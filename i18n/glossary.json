@@ -77,6 +77,17 @@
       "note": "个人微信连接在设置页中的产品名称；先登记为 proposed，待产品术语评审后再决定是否固化。"
     },
     {
+      "id": "dingtalk",
+      "status": "proposed",
+      "en": "DingTalk",
+      "translations": {
+        "zh-CN": "钉钉",
+        "ja": "DingTalk",
+        "ko": "DingTalk"
+      },
+      "note": "钉钉企业内部应用机器人渠道的产品名称；中文沿用官方品牌名，日文与韩文暂保留英文品牌名，待产品术语评审。"
+    },
+    {
       "id": "openclaw",
       "status": "proposed",
       "en": "OpenClaw",

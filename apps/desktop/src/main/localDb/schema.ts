@@ -23,6 +23,7 @@ import type { SessionSource } from '../../shared/sessionSource.js';
 const SESSION_SOURCES = [
   'desktop',
   'feishu',
+  'dingtalk',
   'slack',
   'telegram',
   'discord',

@@ -1723,6 +1723,40 @@
         }
       }
     },
+    "dingtalkBot": {
+      "title": "DingTalk Bot",
+      "description": "Connect an internal-app bot to use {{appName}} in DingTalk direct messages.",
+      "status": {
+        "needsConfig": "Needs setup",
+        "connecting": "Connecting…",
+        "connected": "Connected",
+        "error": "Connection failed"
+      },
+      "connectedTitle": "DingTalk bot connected",
+      "ownerLabel": "Bound user",
+      "ownerWaiting": "Waiting for the first DM",
+      "clientIdPlaceholder": "Paste the app Client ID",
+      "clientSecretPlaceholder": "Paste the app Client Secret",
+      "showSecret": "Show Client Secret",
+      "hideSecret": "Hide Client Secret",
+      "formHint": "Create an internal-app bot in DingTalk Open Platform and select Stream mode. The first DM binds its sender; this version supports direct text chat only.",
+      "connectionError": "Connection failed. Check the Client ID, Client Secret, and that the published bot uses Stream mode.",
+      "connectionErrors": {
+        "unauthorized": "DingTalk rejected the app credentials (HTTP 401). Confirm that you entered the AppKey and the reset AppSecret.",
+        "badRequest": "DingTalk rejected the Stream connection request (HTTP 400). Confirm that Stream mode is enabled and the latest bot version is published.",
+        "timeout": "The Stream endpoint was obtained, but the WebSocket connection timed out. Check your network, proxy, or firewall and try again."
+      },
+      "openConsole": "Open DingTalk Open Platform ↗",
+      "connect": "Connect",
+      "reconnect": "Reconnect",
+      "clear": "Unbind DingTalk bot",
+      "clearConfirm": {
+        "title": "Unbind DingTalk bot?",
+        "description": "This disconnects Stream mode and clears the saved Client ID, Client Secret, and bound user. Existing conversations are kept.",
+        "confirm": "Unbind",
+        "cancel": "Cancel"
+      }
+    },
     "logout": {
       "button": "Log out",
       "aria": "Log out"
@@ -2375,13 +2409,14 @@
       },
       "tips": {
         "cindy": "Cindy is the official shared bot — no credentials needed. Connect Slack and just @Cindy to hand off tasks.",
-        "personal": "Personal connections include WeChat scan authorization and your own Feishu / Discord credentials. Each channel keeps independent new-conversation settings.",
-        "personalFeishuOnly": "Personal connections include WeChat scan authorization and your own Feishu credentials. Each channel keeps independent new-conversation settings."
+        "personal": "Personal connections include WeChat scan authorization and your own Feishu / DingTalk / Discord credentials. Each channel keeps independent new-conversation settings.",
+        "personalFeishuOnly": "Personal connections include WeChat scan authorization and your own Feishu / DingTalk credentials. Each channel keeps independent new-conversation settings."
       },
       "defaults": {
         "title": "New Conversation Configuration",
         "channelDescriptions": {
           "feishu": "New Feishu conversations use this Agent and model. Send /new in an existing DM to apply it.",
+          "dingtalk": "New DingTalk conversations use this Agent, model, and permission mode. Send /new in an existing DM to apply them.",
           "slack": "New Slack threads use this Agent and model.",
           "discord": "New Discord conversations use this Agent and model. Send /new in an existing DM to apply it.",
           "wechat": "New WeChat conversations use this Agent, model, and permission mode. Send /new in an existing chat to apply them."
@@ -7177,6 +7212,10 @@
       "discordBotSaveFailed": "Save failed: {{message}}",
       "discordBotDisconnected": "Discord bot unbound",
       "discordBotDisconnectFailed": "Unbind failed: {{message}}",
+      "dingtalkBotConnected": "DingTalk bot connected",
+      "dingtalkBotConnectFailed": "DingTalk bot connection failed; check the app credentials and Stream setup",
+      "dingtalkBotCleared": "DingTalk bot unbound",
+      "dingtalkBotClearFailed": "Failed to unbind the DingTalk bot",
       "attachmentLocalOnly": "Local files only: {{name}}",
       "attachmentReadError": "{{name}}: {{reason}}",
       "attachmentReadFailed": "Read failed: {{name}} - {{error}}",
@@ -7211,7 +7250,8 @@
       "feishuFieldsRequired": "App ID and App Secret are both required",
       "feishuAppIdFormat": "App ID format should be cli_xxxxxxxxxxxxxxxx",
       "discordFieldsRequired": "Bot Token and Discord user ID are both required",
-      "discordOwnerUserIdFormat": "Discord user ID must be 17-20 digits"
+      "discordOwnerUserIdFormat": "Discord user ID must be 17-20 digits",
+      "dingtalkFieldsRequired": "Client ID and Client Secret are both required"
     },
     "confirm": {
       "logoutTitle": "Log out",

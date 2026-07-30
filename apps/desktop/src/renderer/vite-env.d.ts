@@ -380,6 +380,13 @@ type DiscordBotTransportStatus =
   | { kind: 'conflict'; appId: string }
   | { kind: 'error'; reason: string };
 
+type DingTalkBotState = {
+  status: DiscordBotTransportStatus;
+  clientId: string | null;
+  hasSecret: boolean;
+  ownerUserId: string | null;
+};
+
 type WechatBotPhase =
   | 'disconnected'
   | 'authorizing'
@@ -1666,6 +1673,15 @@ interface ElectronAPI {
         status: DiscordBotTransportStatus;
       }) => void,
     ) => () => void;
+  };
+
+  // ── DingTalk application bot (Stream mode, direct text chat) ──
+  dingtalkBot: {
+    getState: () => Promise<DingTalkBotState>;
+    save: (payload: { clientId: string; clientSecret: string }) => Promise<DingTalkBotState>;
+    reconnect: () => Promise<DingTalkBotState>;
+    clear: () => Promise<DingTalkBotState>;
+    onStateChange: (callback: (state: DingTalkBotState) => void) => () => void;
   };
 
   // ── Personal WeChat (Settings → IM Bot → Personal) ──

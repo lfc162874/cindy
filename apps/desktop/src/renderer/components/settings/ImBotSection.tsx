@@ -26,6 +26,7 @@ import { cn } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
 import { CURRENT_CINDY_REGION } from '../../../shared/brandRegion';
 import { DiscordBotSection } from './DiscordBotSection';
+import { DingTalkBotSection } from './DingTalkBotSection';
 import { FeishuBotSection } from './FeishuBotSection';
 import { HookConnectionsSection } from './HookConnectionsSection';
 import { WechatBotSection } from './WechatBotSection';
@@ -56,11 +57,11 @@ export function isImBotSettingsGroup(value: string | null): value is ImBotSettin
 
 /** 个人栏内容 —— 用户自配凭证的机器人(国区个人账号无 Discord)。 */
 function PersonalGroupContent({ showDiscord }: { showDiscord: boolean }) {
-  const [expandedChannel, setExpandedChannel] = useState<'wechat' | 'feishu' | 'discord' | null>(
-    null,
-  );
+  const [expandedChannel, setExpandedChannel] = useState<
+    'wechat' | 'feishu' | 'dingtalk' | 'discord' | null
+  >(null);
 
-  const toggle = (channel: 'wechat' | 'feishu' | 'discord') => {
+  const toggle = (channel: 'wechat' | 'feishu' | 'dingtalk' | 'discord') => {
     setExpandedChannel((current) => (current === channel ? null : channel));
   };
 
@@ -68,6 +69,10 @@ function PersonalGroupContent({ showDiscord }: { showDiscord: boolean }) {
     <div className="flex flex-col gap-3">
       <WechatBotSection expanded={expandedChannel === 'wechat'} onToggle={() => toggle('wechat')} />
       <FeishuBotSection expanded={expandedChannel === 'feishu'} onToggle={() => toggle('feishu')} />
+      <DingTalkBotSection
+        expanded={expandedChannel === 'dingtalk'}
+        onToggle={() => toggle('dingtalk')}
+      />
       {showDiscord && (
         <DiscordBotSection
           expanded={expandedChannel === 'discord'}

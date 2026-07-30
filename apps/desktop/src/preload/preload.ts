@@ -377,6 +377,8 @@ const fanOutFeishuBotConflict = createIpcFanOut('feishuBot:conflict');
 const fanOutFeishuBotRegistrationStatus = createIpcFanOut('feishuBot:registration-status');
 // Discord Bot：本机凭证模式；这里只暴露 @cindy/im DiscordIM 的 transport 状态。
 const fanOutDiscordBotStatusChange = createIpcFanOut('discordBot:status-change');
+// DingTalk Bot: credential-free Stream connection state.
+const fanOutDingTalkBotStateChange = createIpcFanOut('dingtalkBot:state-change');
 // Personal WeChat: main owns auth/polling and broadcasts a credential-free state snapshot.
 const fanOutWechatBotStateChange = createIpcFanOut('wechatBot:state-changed');
 const fanOutVoiceInputEvent = createIpcFanOut('voice-input:event');
@@ -1467,6 +1469,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
     checkSessionAuth: (): Promise<DiscordBotSessionAuthCheckWire> =>
       ipcRenderer.invoke('discordBot:check-session-auth'),
     onStatusChange: fanOutDiscordBotStatusChange,
+  },
+
+  // ── DingTalk application bot (Stream mode, direct text chat) ──
+  dingtalkBot: {
+    getState: (): Promise<{
+      status:
+        | { kind: 'idle' }
+        | { kind: 'connecting' }
+        | { kind: 'connected'; appId: string }
+        | { kind: 'conflict'; appId: string }
+        | { kind: 'error'; reason: string };
+      clientId: string | null;
+      hasSecret: boolean;
+      ownerUserId: string | null;
+    }> => ipcRenderer.invoke('dingtalkBot:get-state'),
+    save: (payload: { clientId: string; clientSecret: string }) =>
+      ipcRenderer.invoke('dingtalkBot:save', payload),
+    reconnect: () => ipcRenderer.invoke('dingtalkBot:reconnect'),
+    clear: () => ipcRenderer.invoke('dingtalkBot:clear'),
+    onStateChange: fanOutDingTalkBotStateChange,
   },
 
   // ── Personal WeChat (Settings → IM Bot → Personal) ──

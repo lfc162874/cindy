@@ -1722,6 +1722,40 @@
         }
       }
     },
+    "dingtalkBot": {
+      "title": "钉钉机器人",
+      "description": "绑定企业内部应用机器人，在钉钉单聊中连接 {{appName}}。",
+      "status": {
+        "needsConfig": "需要配置",
+        "connecting": "连接中…",
+        "connected": "已连接",
+        "error": "连接失败"
+      },
+      "connectedTitle": "已连接钉钉机器人",
+      "ownerLabel": "已绑定用户",
+      "ownerWaiting": "等待首次单聊",
+      "clientIdPlaceholder": "粘贴应用 Client ID",
+      "clientSecretPlaceholder": "粘贴应用 Client Secret",
+      "showSecret": "显示 Client Secret",
+      "hideSecret": "隐藏 Client Secret",
+      "formHint": "在钉钉开放平台创建企业内部应用机器人，消息接收模式选择 Stream。首次单聊会自动绑定当前用户；当前仅支持单聊文字。",
+      "connectionError": "连接失败，请检查 Client ID、Client Secret，以及机器人是否已发布并启用 Stream 模式。",
+      "connectionErrors": {
+        "unauthorized": "钉钉拒绝了应用凭证（HTTP 401）。请确认填写的是 AppKey 和重置后的 AppSecret。",
+        "badRequest": "钉钉未接受 Stream 连接请求（HTTP 400）。请确认机器人已启用 Stream 模式并发布最新版本。",
+        "timeout": "已获取 Stream 连接，但 WebSocket 建连超时。请检查网络、Proxy 或防火墙后重试。"
+      },
+      "openConsole": "打开钉钉开放平台 ↗",
+      "connect": "连接",
+      "reconnect": "重新连接",
+      "clear": "解绑钉钉机器人",
+      "clearConfirm": {
+        "title": "解绑钉钉机器人？",
+        "description": "解绑会断开 Stream 连接，并清除本机保存的 Client ID、Client Secret 和已绑定用户。已有对话会保留。",
+        "confirm": "解绑",
+        "cancel": "取消"
+      }
+    },
     "logout": {
       "button": "退出登录",
       "aria": "退出登录"
@@ -2374,13 +2408,14 @@
       },
       "tips": {
         "cindy": "Cindy 是官方提供的共享机器人：无需申请任何凭证，连接 Slack 后 @Cindy 即可直接派活。",
-        "personal": "个人连接包括微信扫码，以及使用自有凭证接入飞书 / Discord；各渠道独立保存新对话配置。",
-        "personalFeishuOnly": "个人连接包括微信扫码，以及使用自有凭证接入飞书；各渠道独立保存新对话配置。"
+        "personal": "个人连接包括微信扫码，以及使用自有凭证接入飞书 / 钉钉 / Discord；各渠道独立保存新对话配置。",
+        "personalFeishuOnly": "个人连接包括微信扫码，以及使用自有凭证接入飞书 / 钉钉；各渠道独立保存新对话配置。"
       },
       "defaults": {
         "title": "新对话配置",
         "channelDescriptions": {
           "feishu": "飞书新对话会使用这组 Agent 和模型；已有私聊发送 /new 后应用。",
+          "dingtalk": "钉钉新对话会使用这组 Agent、模型和权限模式；已有单聊发送 /new 后应用。",
           "slack": "Slack 新 thread 会使用这组 Agent 和模型。",
           "discord": "Discord 新对话会使用这组 Agent 和模型；已有私聊发送 /new 后应用。",
           "wechat": "微信新对话会使用这组 Agent、模型和权限模式；已有私聊发送 /new 后应用。"
@@ -7167,6 +7202,10 @@
       "discordBotSaveFailed": "保存失败：{{message}}",
       "discordBotDisconnected": "已解绑 Discord 机器人",
       "discordBotDisconnectFailed": "解绑失败：{{message}}",
+      "dingtalkBotConnected": "钉钉机器人已连接",
+      "dingtalkBotConnectFailed": "钉钉机器人连接失败，请检查应用凭证和 Stream 配置",
+      "dingtalkBotCleared": "已解绑钉钉机器人",
+      "dingtalkBotClearFailed": "解绑钉钉机器人失败",
       "attachmentLocalOnly": "仅支持本地文件：{{name}}",
       "attachmentReadError": "{{name}}：{{reason}}",
       "attachmentReadFailed": "读取失败：{{name}} - {{error}}",
@@ -7201,7 +7240,8 @@
       "feishuFieldsRequired": "App ID 和 App Secret 都需要填写",
       "feishuAppIdFormat": "App ID 格式应为 cli_xxxxxxxxxxxxxxxx",
       "discordFieldsRequired": "Bot Token 和 Discord 用户 ID 都需要填写",
-      "discordOwnerUserIdFormat": "Discord 用户 ID 必须是 17-20 位纯数字"
+      "discordOwnerUserIdFormat": "Discord 用户 ID 必须是 17-20 位纯数字",
+      "dingtalkFieldsRequired": "Client ID 和 Client Secret 都需要填写"
     },
     "confirm": {
       "logoutTitle": "退出登录",

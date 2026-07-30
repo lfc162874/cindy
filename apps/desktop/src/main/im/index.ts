@@ -57,8 +57,9 @@ import { and, eq, like, ne, sql } from 'drizzle-orm';
 
 import { getDbClient } from '../localDb/client/current';
 import { sessions } from '../localDb/schema';
-import { im, feishuIm, discordIm, wechatCompatibilityPolicy, wechatIm } from './host';
+import { im, feishuIm, dingtalkIm, discordIm, wechatCompatibilityPolicy, wechatIm } from './host';
 import { wireFeishuOrchestrator, type FeishuOrchestratorConfig } from './feishu';
+import { wireDingTalkOrchestrator } from './dingtalk';
 import { wireDiscordOrchestrator } from './discord';
 import { wireWechatOrchestrator } from './wechat';
 import { getImOrchestrator, listImOrchestrators } from './shared/orchestrator';
@@ -79,13 +80,14 @@ import { getUpdateStatus } from '../updateService';
 
 import { createLogger } from '../logger';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer';
+import { requireObject, requireString, throwIpcError } from '../utils/ipcValidate';
 import {
   readWechatChannelSettings,
   resetWechatWorkingDir,
   writeWechatWorkingDir,
 } from './wechat/channelSettings';
 
-export { im, feishuIm, discordIm, wechatIm } from './host';
+export { im, feishuIm, dingtalkIm, discordIm, wechatIm } from './host';
 
 const log = createLogger('main:im');
 
@@ -146,6 +148,13 @@ const DISCORD_CONFIG: ImOrchestratorConfig = {
   effortOverrides: IM_DEFAULT_EFFORT_OVERRIDES,
 };
 
+const DINGTALK_CONFIG: ImOrchestratorConfig = {
+  agentKind: IM_DEFAULT_SETTINGS.agentKind,
+  defaultModel: IM_DEFAULT_SETTINGS.agents[IM_DEFAULT_SETTINGS.agentKind].model,
+  defaultPermissionMode: IM_DEFAULT_SETTINGS.permissionMode,
+  effortOverrides: IM_DEFAULT_EFFORT_OVERRIDES,
+};
+
 const WECHAT_CONFIG: ImOrchestratorConfig = {
   agentKind: IM_DEFAULT_SETTINGS.agentKind,
   defaultModel: IM_DEFAULT_SETTINGS.agents[IM_DEFAULT_SETTINGS.agentKind].model,
@@ -169,8 +178,49 @@ export function startImOrchestrators(): void {
   });
 
   wireFeishuOrchestrator(feishuIm, FEISHU_CONFIG);
+  wireDingTalkOrchestrator(dingtalkIm, DINGTALK_CONFIG);
   wireDiscordOrchestrator(discordIm, DISCORD_CONFIG);
   wireWechatOrchestrator(wechatIm, WECHAT_CONFIG);
+
+  ipcMain.handle('dingtalkBot:get-state', (event) => {
+    assertTrustedAppRendererEvent(event);
+    return dingtalkIm.getState();
+  });
+  ipcMain.handle('dingtalkBot:save', async (event, payload: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    const input = requireObject(payload);
+    const clientId = requireString(input.clientId, 'clientId').trim();
+    const clientSecret = requireString(input.clientSecret, 'clientSecret').trim();
+    if (clientId.length > 256 || clientSecret.length > 512) {
+      throwIpcError('INVALID_PARAMS', 'DingTalk credentials are too long');
+    }
+    try {
+      return await connectionLifecycle.runWhileStarted(() =>
+        dingtalkIm.saveConfig(clientId, clientSecret),
+      );
+    } catch (error) {
+      log.warn('DingTalk credential save or connection failed', {
+        errorCode: error instanceof Error ? error.message : 'UNKNOWN',
+      });
+      throwIpcError('INTERNAL', 'Unable to connect the DingTalk bot');
+    }
+  });
+  ipcMain.handle('dingtalkBot:reconnect', async (event) => {
+    assertTrustedAppRendererEvent(event);
+    try {
+      return await connectionLifecycle.runWhileStarted(() => dingtalkIm.reconnect());
+    } catch {
+      throwIpcError('INTERNAL', 'Unable to reconnect the DingTalk bot');
+    }
+  });
+  ipcMain.handle('dingtalkBot:clear', async (event) => {
+    assertTrustedAppRendererEvent(event);
+    try {
+      return await connectionLifecycle.runWhileStarted(() => dingtalkIm.clearConfig());
+    } catch {
+      throwIpcError('INTERNAL', 'Unable to clear the DingTalk bot credentials');
+    }
+  });
 
   ipcMain.handle('wechatBot:get-state', (event) => {
     assertTrustedAppRendererEvent(event);

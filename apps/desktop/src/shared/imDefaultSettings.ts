@@ -3,7 +3,7 @@ export type ImDefaultPermissionMode =
   'ask' | 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions';
 export type ImDefaultEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 /** IM channel scopes that keep independent new-conversation routing preferences. */
-export type ImDefaultSettingsChannel = 'feishu' | 'slack' | 'discord' | 'wechat';
+export type ImDefaultSettingsChannel = 'feishu' | 'dingtalk' | 'slack' | 'discord' | 'wechat';
 
 export interface ImDefaultAgentSettings {
   providerId: string | null;
@@ -48,6 +48,7 @@ export const IM_DEFAULT_SETTINGS: ImDefaultSettings = {
 
 export const IM_DEFAULT_SETTINGS_CHANNELS: readonly ImDefaultSettingsChannel[] = [
   'feishu',
+  'dingtalk',
   'slack',
   'discord',
   'wechat',

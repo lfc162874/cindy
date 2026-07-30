@@ -27,7 +27,7 @@ import type {
 import type { ChannelIM, ImOutputDriver, IMUnsupportedEntry } from '@cindy/im';
 
 /** 渠道名 — 同时是 sessions.source 列值与 IdentityKey.channel 的值域。 */
-export type ImChannelName = 'feishu' | 'slack' | 'discord' | 'wechat';
+export type ImChannelName = 'feishu' | 'dingtalk' | 'slack' | 'discord' | 'wechat';
 
 /**
  * IM 编排层的产品默认配置(由 main/im/index.ts 产品接线层注入)。
@@ -96,6 +96,8 @@ export interface ImChannelAdapter {
   sessions: ImSessionNamespace;
   /** "已收到" ack 的 emoji(feishu: emoji_type 枚举名;slack: emoji 名)。 */
   processingEmoji: string;
+  /** False for MVP transports that support text commands but no interactive cards. */
+  supportsRichCommands?: boolean;
   /**
    * thread = session 模型开关(slack: true)。开启后:
    *   - 入站事件的 scopeKey(thread root ts)参与会话路由与接管 binding

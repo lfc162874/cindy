@@ -71,6 +71,9 @@ export interface IMHost {
 
   httpPostForm(url: string, form: URLSearchParams): Promise<{ status: number; body: unknown }>;
 
+  /** Host-owned JSON POST transport for channel reply webhooks. */
+  httpPostJson?(url: string, body: unknown): Promise<{ status: number; body: unknown }>;
+
   /** Optional logger factory; default is a console logger. */
   createLogger?(scope: string): Logger;
 }

@@ -1,6 +1,7 @@
 export const SESSION_SOURCES = [
   'desktop',
   'feishu',
+  'dingtalk',
   'slack',
   'telegram',
   'discord',
@@ -27,6 +28,7 @@ export type SessionSource = (typeof SESSION_SOURCES)[number];
 export const DESKTOP_VISIBLE_SESSION_SOURCES: SessionSource[] = [
   'desktop',
   'feishu',
+  'dingtalk',
   'slack',
   'telegram',
   'discord',
@@ -39,6 +41,7 @@ export const DESKTOP_VISIBLE_SESSION_SOURCES: SessionSource[] = [
 
 export function normalizeSessionSource(source: unknown): SessionSource {
   return source === 'feishu' ||
+    source === 'dingtalk' ||
     source === 'slack' ||
     source === 'telegram' ||
     source === 'discord' ||

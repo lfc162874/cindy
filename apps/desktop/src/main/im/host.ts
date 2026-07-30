@@ -13,7 +13,7 @@
 import path from 'node:path';
 import { app, ipcMain, BrowserWindow, net, shell } from 'electron';
 
-import { createIM, createDiscordIM, createFeishuIM, type IMHost } from '@cindy/im';
+import { createIM, createDingTalkIM, createDiscordIM, createFeishuIM, type IMHost } from '@cindy/im';
 import { TencentIlinkTransport } from '@cindy/wechat-ilink';
 
 import { createLogger } from '../logger';
@@ -118,10 +118,24 @@ const host: IMHost = {
       return { status: res.status, body: { error: text || `HTTP ${res.status}` } };
     }
   },
+  async httpPostJson(url, body) {
+    const res = await net.fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    try {
+      return { status: res.status, body: JSON.parse(text) as unknown };
+    } catch {
+      return { status: res.status, body: { error: text || `HTTP ${res.status}` } };
+    }
+  },
   createLogger,
 };
 
 export const feishuIm = createFeishuIM(host);
+export const dingtalkIm = createDingTalkIM(host);
 export const discordIm = createDiscordIM(host, {
   resolveImageUrl: resolveManagedImageAbsPath,
   expiredCardNotice: discordUiText.expiredCardNotice,
@@ -170,4 +184,4 @@ wechatCompatibilityPolicy.subscribe((decision) => {
     log.warn('failed to apply personal WeChat compatibility policy');
   });
 });
-export const im = createIM([feishuIm, discordIm, wechatIm]);
+export const im = createIM([feishuIm, dingtalkIm, discordIm, wechatIm]);

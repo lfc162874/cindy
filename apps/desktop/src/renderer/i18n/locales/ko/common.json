@@ -1722,6 +1722,40 @@
         }
       }
     },
+    "dingtalkBot": {
+      "title": "DingTalk 봇",
+      "description": "사내 앱 봇을 연결해 DingTalk DM에서 {{appName}}을 사용합니다.",
+      "status": {
+        "needsConfig": "설정 필요",
+        "connecting": "연결 중…",
+        "connected": "연결됨",
+        "error": "연결 실패"
+      },
+      "connectedTitle": "DingTalk 봇 연결됨",
+      "ownerLabel": "연결된 사용자",
+      "ownerWaiting": "첫 DM 대기 중",
+      "clientIdPlaceholder": "앱 Client ID 붙여넣기",
+      "clientSecretPlaceholder": "앱 Client Secret 붙여넣기",
+      "showSecret": "Client Secret 표시",
+      "hideSecret": "Client Secret 숨기기",
+      "formHint": "DingTalk Open Platform에서 사내 앱 봇을 만들고 Stream 모드를 선택하세요. 첫 DM 발신자가 연결되며 현재는 1:1 텍스트 채팅만 지원합니다.",
+      "connectionError": "연결에 실패했습니다. Client ID, Client Secret 및 게시된 봇의 Stream 설정을 확인하세요.",
+      "connectionErrors": {
+        "unauthorized": "DingTalk에서 앱 자격 증명을 거부했습니다(HTTP 401). AppKey와 재설정한 AppSecret을 입력했는지 확인하세요.",
+        "badRequest": "DingTalk에서 Stream 연결 요청을 거부했습니다(HTTP 400). Stream 모드를 활성화하고 최신 봇 버전을 게시했는지 확인하세요.",
+        "timeout": "Stream 엔드포인트를 가져왔지만 WebSocket 연결 시간이 초과되었습니다. 네트워크, 프록시 또는 방화벽을 확인한 뒤 다시 시도하세요."
+      },
+      "openConsole": "DingTalk Open Platform 열기 ↗",
+      "connect": "연결",
+      "reconnect": "다시 연결",
+      "clear": "DingTalk 봇 연결 해제",
+      "clearConfirm": {
+        "title": "DingTalk 봇 연결을 해제할까요?",
+        "description": "Stream 연결을 끊고 저장된 Client ID, Client Secret 및 연결 사용자를 지웁니다. 기존 대화는 유지됩니다.",
+        "confirm": "연결 해제",
+        "cancel": "취소"
+      }
+    },
     "logout": {
       "button": "로그아웃",
       "aria": "로그아웃"
@@ -2374,13 +2408,14 @@
       },
       "tips": {
         "cindy": "Cindy는 공식 제공 공유 봇입니다. 자격 증명을 신청할 필요 없이 Slack을 연결하고 @Cindy를 멘션하면 바로 작업을 맡길 수 있습니다.",
-        "personal": "개인 연결에는 WeChat 스캔 인증과 직접 발급한 Feishu / Discord 인증 정보 연결이 포함됩니다. 새 대화 설정은 채널별로 저장됩니다.",
-        "personalFeishuOnly": "개인 연결에는 WeChat 스캔 인증과 직접 발급한 Feishu 인증 정보 연결이 포함됩니다. 새 대화 설정은 채널별로 저장됩니다."
+        "personal": "개인 연결에는 WeChat 스캔 인증과 직접 발급한 Feishu / DingTalk / Discord 인증 정보 연결이 포함됩니다. 새 대화 설정은 채널별로 저장됩니다.",
+        "personalFeishuOnly": "개인 연결에는 WeChat 스캔 인증과 직접 발급한 Feishu / DingTalk 인증 정보 연결이 포함됩니다. 새 대화 설정은 채널별로 저장됩니다."
       },
       "defaults": {
         "title": "새 대화 설정",
         "channelDescriptions": {
           "feishu": "새 Feishu 대화는 이 Agent와 모델을 사용합니다. 기존 DM에는 /new를 보내 적용하세요.",
+          "dingtalk": "새 DingTalk 대화는 이 Agent, 모델, 권한 모드를 사용합니다. 기존 DM에는 /new를 보내 적용하세요.",
           "slack": "새 Slack 스레드는 이 Agent와 모델을 사용합니다.",
           "discord": "새 Discord 대화는 이 Agent와 모델을 사용합니다. 기존 DM에는 /new를 보내 적용하세요.",
           "wechat": "새 WeChat 대화는 이 Agent, 모델, 권한 모드를 사용합니다. 기존 채팅에는 /new를 보내 적용하세요."
@@ -7167,6 +7202,10 @@
       "discordBotSaveFailed": "저장 실패: {{message}}",
       "discordBotDisconnected": "Discord 봇 연동이 해제됨",
       "discordBotDisconnectFailed": "연동 해제 실패: {{message}}",
+      "dingtalkBotConnected": "DingTalk 봇이 연결되었습니다",
+      "dingtalkBotConnectFailed": "DingTalk 봇 연결에 실패했습니다. 앱 인증 정보와 Stream 설정을 확인하세요",
+      "dingtalkBotCleared": "DingTalk 봇 연결이 해제되었습니다",
+      "dingtalkBotClearFailed": "DingTalk 봇 연결 해제에 실패했습니다",
       "attachmentLocalOnly": "로컬 파일만 지원: {{name}}",
       "attachmentReadError": "{{name}}: {{reason}}",
       "attachmentReadFailed": "읽기 실패: {{name}} - {{error}}",
@@ -7201,7 +7240,8 @@
       "feishuFieldsRequired": "App ID와 App Secret 둘 다 입력해야 합니다",
       "feishuAppIdFormat": "App ID 형식은 cli_xxxxxxxxxxxxxxxx여야 합니다",
       "discordFieldsRequired": "Bot Token과 Discord 사용자 ID 둘 다 입력해야 합니다",
-      "discordOwnerUserIdFormat": "Discord 사용자 ID는 17-20자리 숫자여야 합니다"
+      "discordOwnerUserIdFormat": "Discord 사용자 ID는 17-20자리 숫자여야 합니다",
+      "dingtalkFieldsRequired": "Client ID와 Client Secret을 모두 입력해야 합니다"
     },
     "confirm": {
       "logoutTitle": "로그아웃",

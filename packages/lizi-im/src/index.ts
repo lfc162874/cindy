@@ -39,6 +39,9 @@ export { FeishuIM, createFeishuIM } from './feishu/index.js';
 export { DiscordIM, createDiscordIM } from './discord/index.js';
 export type { DiscordIMOptions } from './discord/index.js';
 
+export { DingTalkIM, createDingTalkIM } from './dingtalk/index.js';
+export type { DingTalkBotState, DingTalkIMOptions, DingTalkStreamClient } from './dingtalk/index.js';
+
 export type {
   IdentityKey,
   BindingStore,

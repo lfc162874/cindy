@@ -83,6 +83,11 @@ export function createSlashHandlers(
     const [cmd] = text.trim().split(/\s+/);
     log.info(`slash cmd=${cmd} userId=...${ctx.userId.slice(-8)}`);
 
+    if (adapter.supportsRichCommands === false && cmd !== '/help' && cmd !== '/new') {
+      await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
+      return true;
+    }
+
     switch (cmd) {
       case '/help':
         await safeSendText(ctx.userId, ui.slash.help);
