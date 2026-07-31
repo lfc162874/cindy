@@ -1917,6 +1917,8 @@
         "error": "Connection failed"
       },
       "connectedTitle": "DingTalk bot connected",
+      "savedTitle": "Saved DingTalk Bot Configuration",
+      "savedConnecting": "Connecting to the DingTalk bot…",
       "ownerLabel": "Owner Staff ID",
       "ownerWaiting": "Not configured",
       "clientIdPlaceholder": "Paste the app Client ID",
@@ -1933,8 +1935,11 @@
         "timeout": "The Stream endpoint was obtained, but the WebSocket connection timed out. Check your network, proxy, or firewall and try again."
       },
       "openConsole": "Open DingTalk Open Platform ↗",
-      "connect": "Connect",
-      "reconnect": "Reconnect",
+      "connect": "Connect Bot",
+      "reconnect": "Reconnect Bot",
+      "changeConfig": "Change Configuration",
+      "cancelChange": "Cancel Configuration Change",
+      "saveConfig": "Save Configuration",
       "clear": "Unbind DingTalk bot",
       "clearConfirm": {
         "title": "Unbind DingTalk bot?",

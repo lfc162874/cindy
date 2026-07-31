@@ -93,6 +93,14 @@ class TimedFakeClient extends FakeClient {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -107,6 +115,7 @@ function createHarness(
     }) =>
       | { status: number; body: unknown }
       | Promise<{ status: number; body: unknown }>;
+    clientFactory?: () => DingTalkStreamClient;
   } = {},
 ) {
   const secrets = new Map<string, string>();
@@ -153,8 +162,28 @@ function createHarness(
       return { status: 200, body: { errcode: 0 } };
     },
   };
-  const im = new DingTalkIM(host, { clientFactory: () => client });
+  const clientFactory = options.clientFactory ?? (() => client);
+  const im = new DingTalkIM(host, { clientFactory });
   return { im, client, host, secrets, broadcasts, posts };
+}
+
+function readProactiveText(post: { body: unknown }): string {
+  if (!post.body || typeof post.body !== "object" || Array.isArray(post.body)) {
+    throw new Error("DINGTALK_TEST_INVALID_PROACTIVE_BODY");
+  }
+  const msgParam = (post.body as Record<string, unknown>).msgParam;
+  if (typeof msgParam !== "string") {
+    throw new Error("DINGTALK_TEST_INVALID_MSG_PARAM");
+  }
+  const parsed = JSON.parse(msgParam) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("DINGTALK_TEST_INVALID_MSG_PARAM_JSON");
+  }
+  const text = (parsed as Record<string, unknown>).text;
+  if (typeof text !== "string") {
+    throw new Error("DINGTALK_TEST_INVALID_PROACTIVE_TEXT");
+  }
+  return text;
 }
 
 function directText(
@@ -387,42 +416,228 @@ describe("DingTalkIM", () => {
     expect(client.accessTokenCalls).toBe(0);
     await im.dispose();
   });
-  it("continues sending remaining chunks when an intermediate chunk fails", async () => {
-    // When commitFinal sends multiple chunks and one fails mid-stream,
-    // it should still attempt all subsequent chunks rather than silently
-    // truncating the reply. The first error is re-thrown after the loop.
-    let callIndex = 0;
+  it("stops after a non-retryable chunk failure and sends an incomplete notice", async () => {
+    // 分块发送时若中间段失败（且不属于可重试错误），应立即停止后续分块，
+    // 并发送一条简短提示告知用户回复不完整。
     const { im, client, posts } = createHarness({
       postResponse: ({ index }) => {
-        if (index === 1) {
-          // Simulate a rate-limit or transport error on the second chunk.
-          throw new Error("DINGTALK_CHUNK_RATE_LIMITED");
-        }
+        // index 1 是第 2 段的首次发送，模拟不可重试错误。
+        if (index === 1) throw new Error("DINGTALK_CHUNK_RATE_LIMITED");
         return { status: 200, body: { errcode: 0 } };
       },
     });
     await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
     client.emit(
       directText({
-        // Provide no session webhook so all chunks go through the proactive API,
-        // making each chunk an independent HTTP call we can selectively fail.
+        // 不提供 session webhook，使所有分块走主动发送 API。
         sessionWebhook: "",
         sessionWebhookExpiredTime: 0,
       }),
     );
     await Promise.resolve();
 
-    // Send a text long enough to produce multiple chunks (chunk size ~4000).
     const longText = "a".repeat(8001);
     await expect(
       im.commitFinal({ userId: "staff-1", text: longText, terminal: "done" }),
     ).rejects.toThrow("DINGTALK_CHUNK_RATE_LIMITED");
 
-    // All three chunks should have been attempted despite the middle one failing.
-    expect(posts).toHaveLength(3);
+    const sentTexts = posts.map(readProactiveText);
+    expect(sentTexts).toEqual([
+      expect.stringMatching(/^\[1\/3\]\n\n/),
+      expect.stringMatching(/^\[2\/3\]\n\n/),
+      "⚠️ 回复第 2/3 段发送失败，本次回复不完整，请重试。",
+    ]);
+    expect(sentTexts.some((text) => text.startsWith("[3/3]"))).toBe(false);
     await im.dispose();
   });
 
+  it("stops and sends incomplete notice after a retryable chunk failure", async () => {
+    // 对 429 限流错误，应做有限重试；重试仍失败后停止后续分块并发送提示。
+    vi.useFakeTimers();
+    const { im, client, posts } = createHarness({
+      postResponse: ({ index }) => {
+        // index 0: chunk 1 成功
+        // index 1, 2, 3: chunk 2 的初始发送 + 2 次重试，全部 429
+        if (index >= 1 && index <= 3)
+          return { status: 429, body: { message: "rate limited" } };
+        return { status: 200, body: { errcode: 0 } };
+      },
+    });
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    client.emit(
+      directText({ sessionWebhook: "", sessionWebhookExpiredTime: 0 }),
+    );
+    await Promise.resolve();
+
+    const longText = "a".repeat(8001);
+    const sendPromise = expect(
+      im.commitFinal({ userId: "staff-1", text: longText, terminal: "done" }),
+    ).rejects.toThrow("DINGTALK_PROACTIVE_HTTP_429");
+
+    // 推进 fake timer 让退避 setTimeout 立即到期。
+    await vi.advanceTimersByTimeAsync(3_000);
+    await sendPromise;
+
+    const sentTexts = posts.map(readProactiveText);
+    expect(sentTexts).toEqual([
+      expect.stringMatching(/^\[1\/3\]\n\n/),
+      expect.stringMatching(/^\[2\/3\]\n\n/),
+      expect.stringMatching(/^\[2\/3\]\n\n/),
+      expect.stringMatching(/^\[2\/3\]\n\n/),
+      "⚠️ 回复第 2/3 段发送失败，本次回复不完整，请重试。",
+    ]);
+    expect(sentTexts.some((text) => text.startsWith("[3/3]"))).toBe(false);
+    await im.dispose();
+  });
+
+  it("continues with later chunks when a retry succeeds", async () => {
+    // 第 2 段首次遇到 429，第一次重试成功后应继续发送第 3 段。
+    vi.useFakeTimers();
+    const { im, client, posts } = createHarness({
+      postResponse: ({ index }) =>
+        index === 1
+          ? { status: 429, body: { message: "rate limited" } }
+          : { status: 200, body: { errcode: 0 } },
+    });
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    client.emit(
+      directText({ sessionWebhook: "", sessionWebhookExpiredTime: 0 }),
+    );
+    await Promise.resolve();
+
+    const commitPromise = im.commitFinal({
+      userId: "staff-1",
+      text: "a".repeat(8001),
+      terminal: "done",
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(commitPromise).resolves.toBeUndefined();
+
+    expect(posts.map(readProactiveText)).toEqual([
+      expect.stringMatching(/^\[1\/3\]\n\n/),
+      expect.stringMatching(/^\[2\/3\]\n\n/),
+      expect.stringMatching(/^\[2\/3\]\n\n/),
+      expect.stringMatching(/^\[3\/3\]\n\n/),
+    ]);
+    await im.dispose();
+  });
+
+  it("numbers every chunk without exceeding the DingTalk text budget", async () => {
+    const { im, client, posts } = createHarness();
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    client.emit(
+      directText({ sessionWebhook: "", sessionWebhookExpiredTime: 0 }),
+    );
+    await Promise.resolve();
+
+    await im.commitFinal({
+      userId: "staff-1",
+      text: "😀".repeat(8001),
+      terminal: "done",
+    });
+
+    const sentTexts = posts.map(readProactiveText);
+    expect(sentTexts.map((text) => text.slice(0, 5))).toEqual([
+      "[1/3]",
+      "[2/3]",
+      "[3/3]",
+    ]);
+    expect(sentTexts.every((text) => Array.from(text).length <= 4_000)).toBe(
+      true,
+    );
+    await im.dispose();
+  });
+
+  it("preserves the chunk error when the incomplete notice also fails", async () => {
+    const originalError = new Error("DINGTALK_CHUNK_REJECTED");
+    const { im, client, posts } = createHarness({
+      postResponse: ({ index }) => {
+        if (index === 1) throw originalError;
+        if (index === 2) throw new Error("DINGTALK_NOTICE_FAILED");
+        return { status: 200, body: { errcode: 0 } };
+      },
+    });
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    client.emit(
+      directText({ sessionWebhook: "", sessionWebhookExpiredTime: 0 }),
+    );
+    await Promise.resolve();
+
+    await expect(
+      im.commitFinal({
+        userId: "staff-1",
+        text: "a".repeat(8001),
+        terminal: "done",
+      }),
+    ).rejects.toBe(originalError);
+    expect(posts.map(readProactiveText)).toEqual([
+      expect.stringMatching(/^\[1\/3\]\n\n/),
+      expect.stringMatching(/^\[2\/3\]\n\n/),
+      "⚠️ 回复第 2/3 段发送失败，本次回复不完整，请重试。",
+    ]);
+    await im.dispose();
+  });
+
+  it("retries proactive reply with new connection after reconnect races token fetch", async () => {
+    // 获取 token 期间发生重连，旧 token 请求返回 DINGTALK_CONNECTION_CHANGED。
+    // 新逻辑应捕获该错误，使用新连接重试一次并成功发送。
+    const firstClient = new FakeClient();
+    const nextClient = new FakeClient();
+    const clients = [firstClient, nextClient];
+    const token = deferred<string>();
+    vi.spyOn(firstClient, "getAccessToken").mockReturnValue(token.promise);
+    const { im, posts } = createHarness({
+      clientFactory: () => {
+        const client = clients.shift();
+        if (!client) throw new Error("DINGTALK_TEST_CLIENT_EXHAUSTED");
+        return client;
+      },
+    });
+
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    const sendPromise = im.sendText("staff-1", "done");
+    await Promise.resolve();
+
+    // 触发重连，新 client 使用默认的 getAccessToken（立即返回）。
+    await im.reconnect();
+    // 旧 token 请求返回，触发 DINGTALK_CONNECTION_CHANGED。
+    token.resolve("stale-token");
+
+    // 重连后应使用新 client 重试，最终发送成功。
+    await expect(sendPromise).resolves.toMatchObject({
+      messageId: expect.any(String),
+    });
+    // 仅产生 1 次主动发送 POST（重试后的那次）。
+    expect(posts).toHaveLength(1);
+    await im.dispose();
+  });
+
+  it("refuses to retry proactive reply when config has changed", async () => {
+    // 如果重连后 Client ID 已变更，不得用新机器人发送旧会话结果。
+    const firstClient = new FakeClient();
+    const nextClient = new FakeClient();
+    const clients = [firstClient, nextClient];
+    const token = deferred<string>();
+    vi.spyOn(firstClient, "getAccessToken").mockReturnValue(token.promise);
+    const { im } = createHarness({
+      clientFactory: () => {
+        const client = clients.shift();
+        if (!client) throw new Error("DINGTALK_TEST_CLIENT_EXHAUSTED");
+        return client;
+      },
+    });
+
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    const sendPromise = im.sendText("staff-1", "done");
+    await Promise.resolve();
+
+    // 重连前更换 Client ID，模拟配置变更。
+    await im.saveConfig("ding-client-new", "invalid-test-secret", "staff-1");
+    token.resolve("stale-token");
+
+    await expect(sendPromise).rejects.toThrow("DINGTALK_CONFIG_CHANGED");
+    await im.dispose();
+  });
   it("broadcasts hasSecret false to all windows after clearing credentials", async () => {
     // After clearConfig deletes persisted secrets, the final broadcast must
     // reflect hasSecret: false. Previously dispose() set idle first, and the
@@ -574,7 +789,10 @@ describe("DingTalkIM", () => {
       paths: { feishuMediaDir: "/tmp/fake-feishu-media" },
       secrets: {
         isAvailable: () => true,
-        write: (key, value) => { secrets.set(key, value); return true; },
+        write: (key, value) => {
+          secrets.set(key, value);
+          return true;
+        },
         read: (key) => secrets.get(key) ?? null,
         remove: (key) => secrets.delete(key),
       },
@@ -605,11 +823,7 @@ describe("DingTalkIM", () => {
     expect(secrets.get("dingtalk-bot-client-id")).toBe("old-client");
 
     // Try to replace with bad credentials.
-    const result = await im.saveConfig(
-      "bad-client",
-      "bad-secret",
-      "staff-bad",
-    );
+    const result = await im.saveConfig("bad-client", "bad-secret", "staff-bad");
 
     // Secrets should have been rolled back to the old credentials.
     expect(secrets.get("dingtalk-bot-client-id")).toBe("old-client");
@@ -629,7 +843,6 @@ describe("DingTalkIM", () => {
     await im.dispose();
   });
 });
-
 
 describe("DingTalk text helpers", () => {
   it("chunks long Unicode text without breaking surrogate pairs", () => {

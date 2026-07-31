@@ -1916,6 +1916,8 @@
         "error": "连接失败"
       },
       "connectedTitle": "已连接钉钉机器人",
+      "savedTitle": "已保存钉钉机器人配置",
+      "savedConnecting": "正在连接钉钉机器人…",
       "ownerLabel": "所有者 Staff ID",
       "ownerWaiting": "未配置",
       "clientIdPlaceholder": "粘贴应用 Client ID",
@@ -1932,8 +1934,11 @@
         "timeout": "已获取 Stream 连接，但 WebSocket 建连超时。请检查网络、Proxy 或防火墙后重试。"
       },
       "openConsole": "打开钉钉开放平台 ↗",
-      "connect": "连接",
-      "reconnect": "重新连接",
+      "connect": "连接机器人",
+      "reconnect": "重新连接机器人",
+      "changeConfig": "更换配置",
+      "cancelChange": "取消更换配置",
+      "saveConfig": "保存配置",
       "clear": "解绑钉钉机器人",
       "clearConfirm": {
         "title": "解绑钉钉机器人？",

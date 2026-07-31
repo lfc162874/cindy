@@ -1916,6 +1916,8 @@
         "error": "接続失敗"
       },
       "connectedTitle": "DingTalk ボットに接続済み",
+      "savedTitle": "DingTalk ボットの設定を保存済み",
+      "savedConnecting": "DingTalk ボットに接続中…",
       "ownerLabel": "所有者 Staff ID",
       "ownerWaiting": "未設定",
       "clientIdPlaceholder": "アプリの Client ID を貼り付け",
@@ -1932,8 +1934,11 @@
         "timeout": "Stream エンドポイントは取得できましたが、WebSocket 接続がタイムアウトしました。ネットワーク、プロキシ、またはファイアウォールを確認して再試行してください。"
       },
       "openConsole": "DingTalk Open Platform を開く ↗",
-      "connect": "接続",
-      "reconnect": "再接続",
+      "connect": "ボットに接続",
+      "reconnect": "ボットを再接続",
+      "changeConfig": "設定を変更",
+      "cancelChange": "設定変更をキャンセル",
+      "saveConfig": "設定を保存",
       "clear": "DingTalk ボットを解除",
       "clearConfirm": {
         "title": "DingTalk ボットを解除しますか？",

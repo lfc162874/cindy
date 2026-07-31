@@ -1916,6 +1916,8 @@
         "error": "연결 실패"
       },
       "connectedTitle": "DingTalk 봇 연결됨",
+      "savedTitle": "DingTalk 봇 설정 저장됨",
+      "savedConnecting": "DingTalk 봇에 연결 중…",
       "ownerLabel": "소유자 Staff ID",
       "ownerWaiting": "설정되지 않음",
       "clientIdPlaceholder": "앱 Client ID 붙여넣기",
@@ -1932,8 +1934,11 @@
         "timeout": "Stream 엔드포인트를 가져왔지만 WebSocket 연결 시간이 초과되었습니다. 네트워크, 프록시 또는 방화벽을 확인한 뒤 다시 시도하세요."
       },
       "openConsole": "DingTalk Open Platform 열기 ↗",
-      "connect": "연결",
-      "reconnect": "다시 연결",
+      "connect": "봇 연결",
+      "reconnect": "봇 다시 연결",
+      "changeConfig": "설정 변경",
+      "cancelChange": "설정 변경 취소",
+      "saveConfig": "설정 저장",
       "clear": "DingTalk 봇 연결 해제",
       "clearConfirm": {
         "title": "DingTalk 봇 연결을 해제할까요?",

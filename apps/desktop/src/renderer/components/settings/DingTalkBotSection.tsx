@@ -1,5 +1,5 @@
 import { Eye, EyeOff, Loader2, RefreshCw, Trash2 } from 'lucide-react';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
@@ -36,8 +36,16 @@ export function DingTalkBotSection({
   const bot = useDingTalkBot();
   const { confirm } = useConfirmDialog();
   const [showSecret, setShowSecret] = useState(false);
+  const [editingConfig, setEditingConfig] = useState(false);
   const [routeSummary, setRouteSummary] = useImChannelSettingsSummary('dingtalk');
+  const hasSavedConfig = bot.state.hasSecret;
   const connected = bot.state.status.kind === 'connected';
+  const connecting = bot.state.status.kind === 'connecting';
+
+  useEffect(() => {
+    if (!hasSavedConfig) setEditingConfig(false);
+  }, [hasSavedConfig]);
+
   const handleClear = useCallback(async () => {
     const confirmed = await confirm({
       title: t('settings.dingtalkBot.clearConfirm.title'),
@@ -47,6 +55,27 @@ export function DingTalkBotSection({
     });
     if (confirmed) await bot.clear();
   }, [bot, confirm, t]);
+
+  const handleStartEditing = useCallback(() => {
+    bot.setClientId(bot.state.clientId ?? '');
+    // Client Secret 只保存在安全存储中，不回填到 Renderer；更换配置时必须重新输入。
+    bot.setClientSecret('');
+    bot.setOwnerUserId(bot.state.ownerUserId ?? '');
+    setShowSecret(false);
+    setEditingConfig(true);
+  }, [bot]);
+
+  const handleCancelEditing = useCallback(() => {
+    bot.setClientId(bot.state.clientId ?? '');
+    bot.setClientSecret('');
+    bot.setOwnerUserId(bot.state.ownerUserId ?? '');
+    setShowSecret(false);
+    setEditingConfig(false);
+  }, [bot]);
+
+  const handleSave = useCallback(async () => {
+    if (await bot.save()) setEditingConfig(false);
+  }, [bot]);
 
   return (
     <ImChannelSettingsCard
@@ -65,6 +94,7 @@ export function DingTalkBotSection({
           className="inline-flex items-center gap-1.5 rounded-full border border-[var(--settings-badge-border)] bg-[var(--settings-badge-bg)] px-2.5 py-1 text-11 font-medium"
           style={{ color: statusColor(bot.state.status) }}
           role="status"
+          aria-live="polite"
         >
           <span
             className="h-1.5 w-1.5 rounded-full"
@@ -77,10 +107,12 @@ export function DingTalkBotSection({
       <ImDefaultSettingsSection channel="dingtalk" embedded onSummaryChange={setRouteSummary} />
       <div className="h-px w-full bg-[var(--border-default)]" />
 
-      {connected ? (
+      {hasSavedConfig && !editingConfig ? (
         <div className="flex flex-col gap-3 rounded-xl border border-[var(--border-default)] bg-[var(--surface-chip)] p-4">
           <div className="text-13 font-medium text-[var(--text-primary)]">
-            {t('settings.dingtalkBot.connectedTitle')}
+            {t(
+              connected ? 'settings.dingtalkBot.connectedTitle' : 'settings.dingtalkBot.savedTitle',
+            )}
           </div>
           <div className="text-12 leading-5 text-[var(--text-secondary)]">
             Client ID · {bot.state.clientId}
@@ -88,20 +120,43 @@ export function DingTalkBotSection({
             {t('settings.dingtalkBot.ownerLabel')} ·{' '}
             {bot.state.ownerUserId ?? t('settings.dingtalkBot.ownerWaiting')}
           </div>
-          <div className="flex items-center gap-2">
+          {bot.state.status.kind === 'error' ? (
+            <p className="text-12 text-[var(--settings-error-text)]" role="alert">
+              {t(dingTalkConnectionErrorKey(bot.state.status.reason))}
+            </p>
+          ) : connecting ? (
+            <p className="text-12 text-[var(--settings-source-meta)]">
+              {t('settings.dingtalkBot.savedConnecting')}
+            </p>
+          ) : bot.state.status.kind === 'conflict' ? (
+            <p className="text-12 text-[var(--settings-error-text)]" role="alert">
+              {t('settings.dingtalkBot.connectionError')}
+            </p>
+          ) : null}
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => void bot.reconnect()}
-              disabled={bot.busy !== null}
+              disabled={bot.busy !== null || connecting}
               className="inline-flex h-9 items-center gap-2 rounded-full border border-[var(--border-default)] px-4 text-12 text-[var(--text-primary)] disabled:opacity-50"
             >
-              {bot.busy === 'reconnect' ? (
+              {bot.busy === 'reconnect' || connecting ? (
                 // Spinner rotation on HTML wrapper per DESIGN.md §14.4; SVG stays static.
-                <span className="inline-flex animate-spinner motion-reduce:animate-none"><Loader2 size={14} /></span>
+                <span className="inline-flex animate-spinner motion-reduce:animate-none">
+                  <Loader2 size={14} />
+                </span>
               ) : (
                 <RefreshCw size={14} />
               )}
               {t('settings.dingtalkBot.reconnect')}
+            </button>
+            <button
+              type="button"
+              onClick={handleStartEditing}
+              disabled={bot.busy !== null}
+              className="inline-flex h-9 items-center rounded-full border border-[var(--border-default)] px-4 text-12 text-[var(--text-primary)] disabled:opacity-50"
+            >
+              {t('settings.dingtalkBot.changeConfig')}
             </button>
             <button
               type="button"
@@ -184,20 +239,19 @@ export function DingTalkBotSection({
               {t('settings.dingtalkBot.openConsole')}
             </button>
             <div className="flex items-center gap-2">
-              {bot.state.hasSecret && (
+              {editingConfig && (
                 <button
                   type="button"
-                  onClick={() => void handleClear()}
+                  onClick={handleCancelEditing}
                   disabled={bot.busy !== null}
-                  aria-label={t('settings.dingtalkBot.clear')}
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-full text-[var(--settings-trash-icon)] hover:text-[var(--settings-trash-icon-hover)] disabled:opacity-50"
+                  className="inline-flex h-9 items-center rounded-full border border-[var(--border-default)] px-4 text-12 text-[var(--text-primary)] disabled:opacity-50"
                 >
-                  <Trash2 size={17} />
+                  {t('settings.dingtalkBot.cancelChange')}
                 </button>
               )}
               <button
                 type="button"
-                onClick={() => void bot.save()}
+                onClick={() => void handleSave()}
                 disabled={
                   !bot.clientId.trim() ||
                   !bot.clientSecret.trim() ||
@@ -211,9 +265,15 @@ export function DingTalkBotSection({
               >
                 {bot.busy === 'save' && (
                   // Spinner rotation on HTML wrapper per DESIGN.md §14.4; SVG stays static.
-                  <span className="inline-flex animate-spinner motion-reduce:animate-none"><Loader2 size={14} /></span>
+                  <span className="inline-flex animate-spinner motion-reduce:animate-none">
+                    <Loader2 size={14} />
+                  </span>
                 )}
-                {t('settings.dingtalkBot.connect')}
+                {t(
+                  editingConfig
+                    ? 'settings.dingtalkBot.saveConfig'
+                    : 'settings.dingtalkBot.connect',
+                )}
               </button>
             </div>
           </div>

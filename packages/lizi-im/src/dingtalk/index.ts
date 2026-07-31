@@ -30,6 +30,8 @@ const OWNER_USER_ID_SECRET_KEY = "dingtalk-bot-owner-user-id";
 const CONNECTION_TIMEOUT_MS = 15_000;
 const CONNECTION_POLL_MS = 100;
 const STATUS_POLL_MS = 1_000;
+const CHUNK_MAX_ATTEMPTS = 2;
+const CHUNK_RETRY_DELAY_MS = 1_000;
 const WEBHOOK_HOSTS = new Set(["oapi.dingtalk.com", "api.dingtalk.com"]);
 const PROACTIVE_DIRECT_MESSAGE_URL =
   "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend";
@@ -303,20 +305,65 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
 
   async commitFinal(output: ImFinalOutput): Promise<void> {
     const chunks = chunkDingTalkMarkdown(sanitizeDingTalkMarkdown(output.text));
-    // Send every chunk independently; if an intermediate chunk fails (e.g.
-    // rate-limited or transport error), continue sending the remaining chunks
-    // so the user receives as much of the reply as possible. Collect the first
-    // error encountered and re-throw after the loop so the caller still sees
-    // the failure, but partial delivery is not silently truncated.
+    // 每段带序号标记发送；若某段限流/服务端错误则有限重试。
+    // 重试仍失败后立即停止发送后续分块，并尝试发送一条简短提示，
+    // 让用户明确知道本次回复不完整。最后统一向上层抛出首个错误。
     let firstError: unknown = null;
-    for (const chunk of chunks) {
+    for (let index = 0; index < chunks.length; index += 1) {
+      const numbered = `[${index + 1}/${chunks.length}]\n\n${chunks[index]}`;
       try {
-        await this.sendMarkdownText(output.userId, chunk);
+        await this.sendChunkWithRetry(output.userId, numbered);
       } catch (error) {
         if (firstError === null) firstError = error;
+        // 本段重试后仍然失败，停止后续分块发送，尝试发送残缺提示。
+        await this.sendIncompleteNotice(output.userId, index, chunks.length);
+        break;
       }
     }
     if (firstError !== null) throw firstError;
+  }
+
+  /**
+   * 对单个分块做有限重试：仅 429 / 5xx 等可重试错误触发重试。
+   * 其余错误（如参数不合法、权限不足）直接抛出。
+   */
+  private async sendChunkWithRetry(
+    userId: string,
+    markdown: string,
+  ): Promise<void> {
+    for (let attempt = 0; attempt <= CHUNK_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await this.sendMarkdownText(userId, markdown);
+        return;
+      } catch (error) {
+        const retryable = isRetryableChunkError(error);
+        if (!retryable || attempt >= CHUNK_MAX_ATTEMPTS) throw error;
+        // 退避等待后再试，避免限流场景下立即重打。
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, CHUNK_RETRY_DELAY_MS * (attempt + 1)),
+        );
+      }
+    }
+  }
+
+  /**
+   * 分块发送失败后，尝试向用户发一条简短纯文本提示，
+   * 说明第几段发送失败以及本次回复不完整。
+   * 此方法本身不抛出异常：提示发送失败不影响上层错误链路。
+   */
+  private async sendIncompleteNotice(
+    userId: string,
+    failedIndex: number,
+    total: number,
+  ): Promise<void> {
+    try {
+      await this.sendText(
+        userId,
+        `⚠️ 回复第 ${failedIndex + 1}/${total} 段发送失败，本次回复不完整，请重试。`,
+      );
+    } catch {
+      // 提示本身发送失败时静默忽略，不能覆盖原始错误。
+    }
   }
 
   sendFile(): Promise<SendFileResult> {
@@ -470,6 +517,39 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   }
 
   private async postProactiveReply(
+    userId: string,
+    text: string,
+  ): Promise<void> {
+    // 记录本次请求对应的身份，用于重连后判断是否仍属于同一机器人。
+    // 如果 Client ID 或 Owner 已变更，不得把旧会话结果通过新机器人发送。
+    const expectedClientId = this.clientId;
+    const expectedOwnerUserId = this.ownerUserId;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await this.postProactiveReplyOnce(userId, text);
+        return;
+      } catch (error) {
+        const connectionChanged =
+          error instanceof Error &&
+          error.message === "DINGTALK_CONNECTION_CHANGED";
+        // 非重连错误或已经重试过一次，直接向上抛出。
+        if (!connectionChanged || attempt > 0) throw error;
+        // 配置（Client ID / Owner）已变更，禁止把旧结果发到新机器人。
+        if (
+          this.clientId !== expectedClientId ||
+          this.ownerUserId !== expectedOwnerUserId ||
+          this.ownerUserId !== userId
+        ) {
+          throw new Error("DINGTALK_CONFIG_CHANGED");
+        }
+        // 同一配置的网络重连：清除旧 token，下一轮将使用新连接获取新 token。
+        this.clearProactiveAccessToken();
+        if (!this.client) throw new Error("DINGTALK_NOT_CONNECTED");
+      }
+    }
+  }
+
+  private async postProactiveReplyOnce(
     userId: string,
     text: string,
   ): Promise<void> {
@@ -664,7 +744,9 @@ function dingTalkApiError(body: unknown): string | null {
 function httpPostJsonError(body: unknown): string | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const error = (body as Record<string, unknown>).error;
-  return typeof error === "string" && error ? "DINGTALK_HTTP_PARSE_ERROR" : null;
+  return typeof error === "string" && error
+    ? "DINGTALK_HTTP_PARSE_ERROR"
+    : null;
 }
 
 function assertProactiveResponse(response: {
@@ -701,7 +783,30 @@ function assertProactiveResponse(response: {
   }
 }
 
-function dingTalkConnectFailure(error: unknown): { code: string; logMessage: string } {
+/**
+ * 判断分块发送错误是否值得重试：仅 429（限流）和 5xx（服务端错误）重试，
+ * 避免对 4xx 客户端错误做无意义重试。
+ */
+function isRetryableChunkError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const { message } = error;
+  // 显式限流标记（来自 assertProactiveResponse / postReply 等）。
+  if (message === "DINGTALK_PROACTIVE_FLOW_CONTROLLED") return true;
+  // 错误码格式如 DINGTALK_PROACTIVE_HTTP_429 / DINGTALK_REPLY_HTTP_502。
+  const httpMatch = /_HTTP_(\d{3})$/.exec(message);
+  if (httpMatch) {
+    const status = Number(httpMatch[1]);
+    return status === 429 || (status >= 500 && status < 600);
+  }
+  // SDK 内部连接变化错误也值得在重连后重试。
+  if (message === "DINGTALK_CONNECTION_CHANGED") return true;
+  return false;
+}
+
+function dingTalkConnectFailure(error: unknown): {
+  code: string;
+  logMessage: string;
+} {
   const status = responseStatus(error);
   if (status === 400 || status === 401) {
     return {
@@ -709,17 +814,23 @@ function dingTalkConnectFailure(error: unknown): { code: string; logMessage: str
       logMessage: `HTTP ${status}`,
     };
   }
-  const message = error instanceof Error ? error.message : "DINGTALK_CONNECT_FAILED";
+  const message =
+    error instanceof Error ? error.message : "DINGTALK_CONNECT_FAILED";
   return {
-    code: message === "DINGTALK_CONNECT_TIMEOUT" ? message : "DINGTALK_CONNECT_FAILED",
+    code:
+      message === "DINGTALK_CONNECT_TIMEOUT"
+        ? message
+        : "DINGTALK_CONNECT_FAILED",
     logMessage: message,
   };
 }
 
 function responseStatus(error: unknown): number | null {
-  if (!error || typeof error !== "object" || !("response" in error)) return null;
+  if (!error || typeof error !== "object" || !("response" in error))
+    return null;
   const response = (error as { response?: unknown }).response;
-  if (!response || typeof response !== "object" || !("status" in response)) return null;
+  if (!response || typeof response !== "object" || !("status" in response))
+    return null;
   const status = (response as { status?: unknown }).status;
   return typeof status === "number" && Number.isInteger(status) ? status : null;
 }
