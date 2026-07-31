@@ -425,6 +425,10 @@ type DingTalkBotState = {
   ownerUserId: string | null;
 };
 
+type DingTalkBotSaveResult = DingTalkBotState & {
+  saveErrorStatus?: DingTalkBotTransportStatus;
+};
+
 type WechatBotPhase =
   | 'disconnected'
   | 'authorizing'
@@ -1782,7 +1786,7 @@ interface ElectronAPI {
       clientId: string;
       clientSecret: string;
       ownerUserId: string;
-    }) => Promise<DingTalkBotState>;
+    }) => Promise<DingTalkBotSaveResult>;
     reconnect: () => Promise<DingTalkBotState>;
     clear: () => Promise<DingTalkBotState>;
     onStateChange: (callback: (state: DingTalkBotState) => void) => () => void;

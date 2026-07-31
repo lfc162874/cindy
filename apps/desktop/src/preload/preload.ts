@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import type { DingTalkBotSaveResult, DingTalkBotState } from '@cindy/im';
 import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-link-contract';
 import {
   AGENT_ISLAND_GET_DISPLAY_OPTIONS_CHANNEL,
@@ -1582,21 +1583,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── DingTalk application bot (Stream mode, direct text chat) ──
   dingtalkBot: {
-    getState: (): Promise<{
-      status:
-        | { kind: 'idle' }
-        | { kind: 'connecting' }
-        | { kind: 'connected'; appId: string }
-        | { kind: 'conflict'; appId: string }
-        | { kind: 'error'; reason: string };
-      clientId: string | null;
-      hasSecret: boolean;
-      ownerUserId: string | null;
-    }> => ipcRenderer.invoke('dingtalkBot:get-state'),
-    save: (payload: { clientId: string; clientSecret: string; ownerUserId: string }) =>
-      ipcRenderer.invoke('dingtalkBot:save', payload),
-    reconnect: () => ipcRenderer.invoke('dingtalkBot:reconnect'),
-    clear: () => ipcRenderer.invoke('dingtalkBot:clear'),
+    getState: (): Promise<DingTalkBotState> => ipcRenderer.invoke('dingtalkBot:get-state'),
+    save: (
+      payload: { clientId: string; clientSecret: string; ownerUserId: string },
+    ): Promise<DingTalkBotSaveResult> => ipcRenderer.invoke('dingtalkBot:save', payload),
+    reconnect: (): Promise<DingTalkBotState> => ipcRenderer.invoke('dingtalkBot:reconnect'),
+    clear: (): Promise<DingTalkBotState> => ipcRenderer.invoke('dingtalkBot:clear'),
     onStateChange: fanOutDingTalkBotStateChange,
   },
 

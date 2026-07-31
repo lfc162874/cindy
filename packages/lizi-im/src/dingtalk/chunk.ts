@@ -11,18 +11,31 @@ export function chunkDingTalkMarkdown(
     throw new Error("DINGTALK_INVALID_CHUNK_SIZE");
   }
 
+  // Keep one Unicode code-point array and advance a cursor; rebuilding the
+  // remaining suffix on every iteration made long replies repeatedly rescan
+  // their already-processed prefix.
+  const codepoints = Array.from(text);
   const chunks: string[] = [];
-  let remaining = text;
-  while (Array.from(remaining).length > maxChars) {
-    const codepoints = Array.from(remaining);
-    const window = codepoints.slice(0, maxChars).join("");
+  let start = 0;
+  while (codepoints.length - start > maxChars) {
+    const windowCodepoints = codepoints.slice(start, start + maxChars);
+    const window = windowCodepoints.join("");
     const newline = window.lastIndexOf("\n");
-    const splitAt =
-      newline >= Math.floor(maxChars * 0.5) ? newline + 1 : window.length;
-    const chunk = remaining.slice(0, splitAt).trim();
+    const splitAtCodepoints =
+      newline >= Math.floor(maxChars * 0.5)
+        ? windowCodepoints.lastIndexOf("\n") + 1
+        : windowCodepoints.length;
+    const chunk = windowCodepoints.slice(0, splitAtCodepoints).join("").trim();
     if (chunk) chunks.push(chunk);
-    remaining = remaining.slice(splitAt).trimStart();
+    start += splitAtCodepoints;
+    while (
+      start < codepoints.length &&
+      codepoints[start].trimStart() === ""
+    ) {
+      start += 1;
+    }
   }
+  const remaining = codepoints.slice(start).join("");
   if (remaining) chunks.push(remaining);
   return chunks;
 }

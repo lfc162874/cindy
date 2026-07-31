@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DWClientDownStream } from "dingtalk-stream";
 
 import type { IMHost } from "../types.js";
@@ -53,6 +53,49 @@ class FakeClient implements DingTalkStreamClient {
     });
   }
 }
+
+/**
+ * Reproduces the DingTalk SDK's two-stage connection timing: endpoint lookup
+ * settles `connect()` first, then the WebSocket reports `connected` later.
+ */
+class TimedFakeClient extends FakeClient {
+  disconnectCalls = 0;
+  private openTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private readonly connectDelayMs: number,
+    private readonly openDelayMs: number | null,
+  ) {
+    super();
+  }
+
+  override connect(): Promise<void> {
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        resolve();
+        if (this.openDelayMs === null) return;
+        this.openTimer = setTimeout(() => {
+          // A late SDK continuation can reopen the transport after the caller
+          // has already timed out unless the settled promise is cleaned up.
+          this.connected = true;
+        }, this.openDelayMs);
+      }, this.connectDelayMs);
+    });
+  }
+
+  override disconnect(): void {
+    this.disconnectCalls += 1;
+    // The real SDK closes a WebSocket that is still connecting, so the fake
+    // cancels its pending open event to model that cleanup faithfully.
+    if (this.openTimer) clearTimeout(this.openTimer);
+    this.openTimer = null;
+    super.disconnect();
+  }
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function createHarness(
   options: {
@@ -111,7 +154,7 @@ function createHarness(
     },
   };
   const im = new DingTalkIM(host, { clientFactory: () => client });
-  return { im, client, secrets, broadcasts, posts };
+  return { im, client, host, secrets, broadcasts, posts };
 }
 
 function directText(
@@ -372,7 +415,7 @@ describe("DingTalkIM", () => {
     // Send a text long enough to produce multiple chunks (chunk size ~4000).
     const longText = "a".repeat(8001);
     await expect(
-      im.commitFinal({ userId: "staff-1", text: longText }),
+      im.commitFinal({ userId: "staff-1", text: longText, terminal: "done" }),
     ).rejects.toThrow("DINGTALK_CHUNK_RATE_LIMITED");
 
     // All three chunks should have been attempted despite the middle one failing.
@@ -443,6 +486,83 @@ describe("DingTalkIM", () => {
     await im.dispose();
   });
 
+  it("uses one 15-second deadline across endpoint lookup and socket open", async () => {
+    vi.useFakeTimers();
+    const client = new TimedFakeClient(10_000, null);
+    const { host } = createHarness();
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+    });
+
+    let settled = false;
+    const savePromise = im
+      .saveConfig("ding-client", "invalid-test-secret", "staff-1")
+      .finally(() => {
+        settled = true;
+      });
+
+    // Endpoint discovery consumes ten seconds, leaving only five seconds for
+    // the WebSocket instead of starting a second full timeout window.
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    await expect(savePromise).resolves.toMatchObject({
+      status: { kind: "error", reason: "DINGTALK_CONNECT_TIMEOUT" },
+    });
+    await im.dispose();
+  });
+
+  it("disconnects an endpoint lookup that settles after its timeout", async () => {
+    vi.useFakeTimers();
+    const client = new TimedFakeClient(16_000, 0);
+    const { host } = createHarness();
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+    });
+
+    const savePromise = im.saveConfig(
+      "ding-client",
+      "invalid-test-secret",
+      "staff-1",
+    );
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(savePromise).resolves.toMatchObject({
+      status: { kind: "error", reason: "DINGTALK_CONNECT_TIMEOUT" },
+    });
+    expect(client.disconnectCalls).toBe(1);
+
+    // The unresolved SDK work later constructs and opens its WebSocket. The
+    // stale-client cleanup must close that ghost connection a second time.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(client.disconnectCalls).toBe(2);
+    expect(client.connected).toBe(false);
+    await im.dispose();
+  });
+
+  it("keeps a connection that opens before the shared deadline", async () => {
+    vi.useFakeTimers();
+    const client = new TimedFakeClient(10_000, 4_900);
+    const { host } = createHarness();
+    const im = new DingTalkIM(host, {
+      clientFactory: () => client,
+    });
+
+    const savePromise = im.saveConfig(
+      "ding-client",
+      "invalid-test-secret",
+      "staff-1",
+    );
+    await vi.advanceTimersByTimeAsync(14_900);
+    await expect(savePromise).resolves.toMatchObject({
+      status: { kind: "connected", appId: "ding-client" },
+    });
+    // Late-settlement cleanup is guarded by the active client identity and
+    // must not disconnect a valid connection that completed in time.
+    expect(client.disconnectCalls).toBe(0);
+    await im.dispose();
+  });
+
   it("restores previous credentials when new credentials fail to connect", async () => {
     // When saveConfig receives new credentials that fail the Stream
     // connection, it must roll back to the previous credentials (mirroring
@@ -462,6 +582,9 @@ describe("DingTalkIM", () => {
         handle: vi.fn(),
         broadcast: vi.fn(),
       },
+      // The rollback scenario does not perform HTTP requests, but a complete
+      // host fake keeps the test aligned with the production IMHost contract.
+      httpPostForm: vi.fn(),
     };
     const im = new DingTalkIM(host, {
       clientFactory: () => {
@@ -482,14 +605,27 @@ describe("DingTalkIM", () => {
     expect(secrets.get("dingtalk-bot-client-id")).toBe("old-client");
 
     // Try to replace with bad credentials.
-    await im.saveConfig("bad-client", "bad-secret", "staff-bad");
+    const result = await im.saveConfig(
+      "bad-client",
+      "bad-secret",
+      "staff-bad",
+    );
 
     // Secrets should have been rolled back to the old credentials.
     expect(secrets.get("dingtalk-bot-client-id")).toBe("old-client");
     expect(secrets.get("dingtalk-bot-client-secret")).toBe("old-secret");
     expect(secrets.get("dingtalk-bot-owner-user-id")).toBe("staff-old");
-    // Runtime identity should also reflect the old credentials.
-    expect(im.getState().clientId).toBe("old-client");
+    // The old runtime connection is restored, but the save result must retain
+    // the failed attempted status so the renderer does not report success.
+    expect(result.status).toEqual({
+      kind: "connected",
+      appId: "old-client",
+    });
+    expect(result.clientId).toBe("old-client");
+    expect(result.saveErrorStatus).toEqual({
+      kind: "error",
+      reason: "DINGTALK_CONNECT_FAILED",
+    });
     await im.dispose();
   });
 });
@@ -498,6 +634,22 @@ describe("DingTalkIM", () => {
 describe("DingTalk text helpers", () => {
   it("chunks long Unicode text without breaking surrogate pairs", () => {
     expect(chunkDingTalkMarkdown("😀😀😀", 2)).toEqual(["😀😀", "😀"]);
+  });
+
+  it("converts the source text to code points once", () => {
+    const fromSpy = vi.spyOn(Array, "from");
+    try {
+      fromSpy.mockClear();
+      expect(chunkDingTalkMarkdown("a".repeat(12), 3)).toEqual([
+        "aaa",
+        "aaa",
+        "aaa",
+        "aaa",
+      ]);
+      expect(fromSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      fromSpy.mockRestore();
+    }
   });
 
   it("removes local-only media URLs", () => {

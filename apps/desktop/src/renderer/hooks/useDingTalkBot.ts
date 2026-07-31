@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { useAuth } from '@/contexts/AuthContext';
 import { createLogger } from '@/lib/logger';
 import { toast } from '@/lib/toast';
 import { extractIpcError } from '@/utils/ipcError';
@@ -14,7 +15,15 @@ const EMPTY_STATE: DingTalkBotState = {
   ownerUserId: null,
 };
 
-let cachedState: DingTalkBotState | null = null;
+interface OwnerScopedDingTalkCache {
+  ownerId: string | null;
+  state: DingTalkBotState;
+}
+
+// The renderer survives logout, so every reusable snapshot must carry the
+// Cindy data owner that produced it. An unscoped module cache can otherwise
+// expose one account's DingTalk identifiers to the next account on first paint.
+let cachedState: OwnerScopedDingTalkCache | null = null;
 
 export function dingTalkConnectionErrorKey(reason: string): string {
   if (reason === 'DINGTALK_CONNECT_HTTP_401') {
@@ -31,42 +40,72 @@ export function dingTalkConnectionErrorKey(reason: string): string {
 
 export function useDingTalkBot() {
   const { t } = useTranslation();
-  const [state, setState] = useState<DingTalkBotState>(() => cachedState ?? EMPTY_STATE);
-  const [clientId, setClientId] = useState(() => cachedState?.clientId ?? '');
+  const { dataOwnerId } = useAuth();
+  const cachedForOwner = cachedState?.ownerId === dataOwnerId ? cachedState.state : null;
+  const [state, setState] = useState<DingTalkBotState>(() => cachedForOwner ?? EMPTY_STATE);
+  const [clientId, setClientId] = useState(() => cachedForOwner?.clientId ?? '');
   const [clientSecret, setClientSecret] = useState('');
-  const [ownerUserId, setOwnerUserId] = useState(() => cachedState?.ownerUserId ?? '');
+  const [ownerUserId, setOwnerUserId] = useState(() => cachedForOwner?.ownerUserId ?? '');
   const [validationError, setValidationError] = useState<string | null>(null);
   const [busy, setBusy] = useState<'save' | 'reconnect' | 'clear' | null>(null);
+  const activeOwnerIdRef = useRef(dataOwnerId);
+  const stateOwnerIdRef = useRef(dataOwnerId);
+  const requestGenerationRef = useRef(0);
+  // Update during render, not in an effect, so an old promise resolving
+  // between the owner-change render and passive effects is rejected as stale.
+  activeOwnerIdRef.current = dataOwnerId;
+  const ownerMatches = stateOwnerIdRef.current === dataOwnerId;
 
   const applyState = useCallback((next: DingTalkBotState) => {
-    cachedState = next;
+    cachedState = { ownerId: dataOwnerId, state: next };
+    stateOwnerIdRef.current = dataOwnerId;
     setState(next);
     setClientId(next.clientId ?? '');
     setOwnerUserId(next.ownerUserId ?? '');
-  }, []);
+  }, [dataOwnerId]);
 
   useEffect(() => {
     let cancelled = false;
+    const requestGeneration = ++requestGenerationRef.current;
+    const requestOwnerId = dataOwnerId;
+    if (stateOwnerIdRef.current !== requestOwnerId) {
+      // Clear all account-owned fields before the asynchronous main-process
+      // read starts. The render that observed the owner mismatch already
+      // exposes EMPTY_STATE below, so no previous-account frame is visible.
+      stateOwnerIdRef.current = requestOwnerId;
+      setState(EMPTY_STATE);
+      setClientId('');
+      setClientSecret('');
+      setOwnerUserId('');
+      setValidationError(null);
+    }
     void window.electronAPI.dingtalkBot
       .getState()
       .then((next) => {
-        if (cancelled) return;
-        // If the main process reports a different identity than the module
-        // cache (e.g. account A logged out while this page was unmounted and
-        // the dispose broadcast was missed), discard the stale cache so the
-        // next account does not inherit the previous one's Client ID / Staff ID.
-        if (cachedState && cachedState.clientId !== next.clientId) {
-          cachedState = null;
-        }
+        // Account A reads may resolve after account B has mounted. Generation
+        // and owner checks make those late responses side-effect free.
+        if (
+          cancelled ||
+          requestGenerationRef.current !== requestGeneration ||
+          activeOwnerIdRef.current !== requestOwnerId ||
+          stateOwnerIdRef.current !== requestOwnerId
+        ) return;
         applyState(next);
       })
       .catch((error) => log.error('getState failed', extractIpcError(error)?.code ?? 'UNKNOWN'));
-    const unsubscribe = window.electronAPI.dingtalkBot.onStateChange(applyState);
+    const unsubscribe = window.electronAPI.dingtalkBot.onStateChange((next) => {
+      if (
+        requestGenerationRef.current !== requestGeneration ||
+        activeOwnerIdRef.current !== requestOwnerId ||
+        stateOwnerIdRef.current !== requestOwnerId
+      ) return;
+      applyState(next);
+    });
     return () => {
       cancelled = true;
       unsubscribe();
     };
-  }, [applyState]);
+  }, [applyState, dataOwnerId]);
 
   const save = useCallback(async () => {
     if (busy) return false;
@@ -85,10 +124,19 @@ export function useDingTalkBot() {
         clientSecret: nextSecret,
         ownerUserId: nextOwnerUserId,
       });
-      applyState(next);
+      // saveErrorStatus describes the attempted replacement, while the
+      // ordinary state may already be connected again through rollback.
+      const { saveErrorStatus, ...nextState } = next;
+      applyState(nextState);
       setClientSecret('');
-      if (next.status.kind === 'error') {
-        toast.error(t(dingTalkConnectionErrorKey(next.status.reason)));
+      const errorStatus =
+        saveErrorStatus?.kind === 'error'
+          ? saveErrorStatus
+          : nextState.status.kind === 'error'
+            ? nextState.status
+            : null;
+      if (errorStatus) {
+        toast.error(t(dingTalkConnectionErrorKey(errorStatus.reason)));
         return false;
       }
       toast.success(t('logic.toasts.dingtalkBotConnected'));
@@ -139,18 +187,18 @@ export function useDingTalkBot() {
   }, [applyState, busy, t]);
 
   return {
-    state,
-    clientId,
+    state: ownerMatches ? state : EMPTY_STATE,
+    clientId: ownerMatches ? clientId : '',
     setClientId: (value: string) => {
       setClientId(value);
       setValidationError(null);
     },
-    clientSecret,
+    clientSecret: ownerMatches ? clientSecret : '',
     setClientSecret: (value: string) => {
       setClientSecret(value);
       setValidationError(null);
     },
-    ownerUserId,
+    ownerUserId: ownerMatches ? ownerUserId : '',
     setOwnerUserId: (value: string) => {
       setOwnerUserId(value);
       setValidationError(null);

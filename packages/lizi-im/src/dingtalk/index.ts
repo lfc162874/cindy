@@ -68,6 +68,13 @@ export interface DingTalkBotState {
   ownerUserId: string | null;
 }
 
+/** Save-only metadata plus the current DingTalk runtime state after rollback. */
+export interface DingTalkBotSaveResult extends DingTalkBotState {
+  // The previous runtime may be connected again after rollback. Preserve the
+  // attempted connection failure separately so the UI never reports success.
+  saveErrorStatus?: IMStatus;
+}
+
 interface ReplyRoute {
   webhook: string;
   expiresAt: number;
@@ -158,7 +165,7 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     clientId: string,
     clientSecret: string,
     ownerUserId: string,
-  ): Promise<DingTalkBotState> {
+  ): Promise<DingTalkBotSaveResult> {
     const nextClientId = clientId.trim();
     const nextClientSecret = clientSecret.trim();
     const nextOwnerUserId = ownerUserId.trim();
@@ -194,11 +201,13 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       clientId: nextClientId,
       clientSecret: nextClientSecret,
     });
+    const saveErrorStatus =
+      this.status.kind === "connected" ? undefined : this.status;
     // If the new credentials failed to establish a connection, restore the
     // previous credentials and reconnect so the user is not left with a
     // broken config on restart. Mirrors the Discord/Telegram rollback
     // pattern: persistent secrets + runtime identity + old connection.
-    if (this.status.kind !== "connected" && previous) {
+    if (saveErrorStatus && previous) {
       this.restoreSecret(CLIENT_ID_SECRET_KEY, previous.clientId);
       this.restoreSecret(CLIENT_SECRET_SECRET_KEY, previous.clientSecret);
       this.restoreSecret(OWNER_USER_ID_SECRET_KEY, previousOwnerUserId);
@@ -211,7 +220,10 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
         // status from the new attempt so the user sees what went wrong.
       }
     }
-    return this.getState();
+    return {
+      ...this.getState(),
+      ...(saveErrorStatus ? { saveErrorStatus } : {}),
+    };
   }
 
   async reconnect(): Promise<DingTalkBotState> {
@@ -353,9 +365,21 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     });
 
     try {
+      // Endpoint discovery and the WebSocket open event share one deadline so
+      // a connection attempt can never consume two full timeout windows.
+      const deadline = Date.now() + CONNECTION_TIMEOUT_MS;
       const connectPromise = client.connect();
-      await withTimeout(connectPromise, CONNECTION_TIMEOUT_MS);
-      await waitForConnected(client, CONNECTION_TIMEOUT_MS);
+      const disconnectIfStale = () => {
+        // The SDK does not support cancellation. If endpoint discovery settles
+        // after timeout/disposal/replacement, close the WebSocket it may have
+        // constructed instead of leaving a ghost connection running.
+        if (version !== this.connectionVersion || this.client !== client) {
+          client.disconnect();
+        }
+      };
+      void connectPromise.then(disconnectIfStale, disconnectIfStale);
+      await withDeadline(connectPromise, deadline);
+      await waitForConnected(client, deadline);
       if (version !== this.connectionVersion || this.client !== client) {
         client.disconnect();
         return;
@@ -588,24 +612,28 @@ function replyRoute(
 
 async function waitForConnected(
   client: DingTalkStreamClient,
-  timeoutMs: number,
+  deadline: number,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
   // The official SDK considers the WebSocket usable once `connected` flips.
   // `registered` is an informational flag that is not emitted consistently
   // by every gateway response, so requiring it causes false timeouts.
   while (!client.connected && Date.now() < deadline) {
+    // Clamp the last poll to the remaining budget so timer granularity cannot
+    // extend the connection attempt beyond the shared absolute deadline.
+    const remainingMs = deadline - Date.now();
     await new Promise<void>((resolve) =>
-      setTimeout(resolve, CONNECTION_POLL_MS),
+      setTimeout(resolve, Math.min(CONNECTION_POLL_MS, remainingMs)),
     );
   }
   if (!client.connected) throw new Error("DINGTALK_CONNECT_TIMEOUT");
 }
 
-async function withTimeout<T>(
+async function withDeadline<T>(
   operation: Promise<T>,
-  timeoutMs: number,
+  deadline: number,
 ): Promise<T> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) throw new Error("DINGTALK_CONNECT_TIMEOUT");
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -613,7 +641,7 @@ async function withTimeout<T>(
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
           () => reject(new Error("DINGTALK_CONNECT_TIMEOUT")),
-          timeoutMs,
+          remainingMs,
         );
       }),
     ]);
