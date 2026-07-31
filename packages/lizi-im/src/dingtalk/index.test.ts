@@ -406,7 +406,94 @@ describe("DingTalkIM", () => {
       hasSecret: false,
     });
   });
+  it("throws when httpPostJson returns a parse-error sentinel on the session webhook", async () => {
+    // httpPostJson returns { error: string } when the response body cannot
+    // be parsed as JSON. A 200 response with that body must not be treated
+    // as a successful delivery.
+    const { im, client } = createHarness({
+      postResponse: () => ({
+        status: 200,
+        body: { error: "invalid json" },
+      }),
+    });
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    client.emit(directText());
+    await Promise.resolve();
+
+    await expect(im.sendText("staff-1", "done")).rejects.toThrow(
+      "DINGTALK_HTTP_PARSE_ERROR",
+    );
+    await im.dispose();
+  });
+
+  it("throws when httpPostJson returns a parse-error sentinel on the proactive API", async () => {
+    // Same parse-error detection applies to the proactive direct-message
+    // endpoint via assertProactiveResponse.
+    const { im } = createHarness({
+      postResponse: () => ({
+        status: 200,
+        body: { error: "invalid json" },
+      }),
+    });
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+
+    await expect(im.sendText("staff-1", "done")).rejects.toThrow(
+      "DINGTALK_HTTP_PARSE_ERROR",
+    );
+    await im.dispose();
+  });
+
+  it("restores previous credentials when new credentials fail to connect", async () => {
+    // When saveConfig receives new credentials that fail the Stream
+    // connection, it must roll back to the previous credentials (mirroring
+    // the Discord/Telegram pattern) so the user is not stuck with a broken
+    // config on restart.
+    let connectCall = 0;
+    const secrets = new Map<string, string>();
+    const host: import("../types.js").IMHost = {
+      paths: { feishuMediaDir: "/tmp/fake-feishu-media" },
+      secrets: {
+        isAvailable: () => true,
+        write: (key, value) => { secrets.set(key, value); return true; },
+        read: (key) => secrets.get(key) ?? null,
+        remove: (key) => secrets.delete(key),
+      },
+      ipc: {
+        handle: vi.fn(),
+        broadcast: vi.fn(),
+      },
+    };
+    const im = new DingTalkIM(host, {
+      clientFactory: () => {
+        connectCall += 1;
+        const client = new FakeClient();
+        if (connectCall === 2) {
+          // Second connection (new credentials) fails.
+          client.connect = async () => {
+            throw new Error("DINGTALK_CONNECT_FAILED");
+          };
+        }
+        return client;
+      },
+    });
+
+    // Save initial working credentials.
+    await im.saveConfig("old-client", "old-secret", "staff-old");
+    expect(secrets.get("dingtalk-bot-client-id")).toBe("old-client");
+
+    // Try to replace with bad credentials.
+    await im.saveConfig("bad-client", "bad-secret", "staff-bad");
+
+    // Secrets should have been rolled back to the old credentials.
+    expect(secrets.get("dingtalk-bot-client-id")).toBe("old-client");
+    expect(secrets.get("dingtalk-bot-client-secret")).toBe("old-secret");
+    expect(secrets.get("dingtalk-bot-owner-user-id")).toBe("staff-old");
+    // Runtime identity should also reflect the old credentials.
+    expect(im.getState().clientId).toBe("old-client");
+    await im.dispose();
+  });
 });
+
 
 describe("DingTalk text helpers", () => {
   it("chunks long Unicode text without breaking surrogate pairs", () => {

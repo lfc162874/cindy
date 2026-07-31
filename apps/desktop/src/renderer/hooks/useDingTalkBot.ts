@@ -50,7 +50,15 @@ export function useDingTalkBot() {
     void window.electronAPI.dingtalkBot
       .getState()
       .then((next) => {
-        if (!cancelled) applyState(next);
+        if (cancelled) return;
+        // If the main process reports a different identity than the module
+        // cache (e.g. account A logged out while this page was unmounted and
+        // the dispose broadcast was missed), discard the stale cache so the
+        // next account does not inherit the previous one's Client ID / Staff ID.
+        if (cachedState && cachedState.clientId !== next.clientId) {
+          cachedState = null;
+        }
+        applyState(next);
       })
       .catch((error) => log.error('getState failed', extractIpcError(error)?.code ?? 'UNKNOWN'));
     const unsubscribe = window.electronAPI.dingtalkBot.onStateChange(applyState);

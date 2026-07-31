@@ -194,6 +194,23 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       clientId: nextClientId,
       clientSecret: nextClientSecret,
     });
+    // If the new credentials failed to establish a connection, restore the
+    // previous credentials and reconnect so the user is not left with a
+    // broken config on restart. Mirrors the Discord/Telegram rollback
+    // pattern: persistent secrets + runtime identity + old connection.
+    if (this.status.kind !== "connected" && previous) {
+      this.restoreSecret(CLIENT_ID_SECRET_KEY, previous.clientId);
+      this.restoreSecret(CLIENT_SECRET_SECRET_KEY, previous.clientSecret);
+      this.restoreSecret(OWNER_USER_ID_SECRET_KEY, previousOwnerUserId);
+      this.clientId = previous.clientId;
+      this.ownerUserId = previousOwnerUserId?.trim() || "";
+      try {
+        await this.connect(previous);
+      } catch {
+        // Best-effort: if the old credentials also fail, leave the error
+        // status from the new attempt so the user sees what went wrong.
+      }
+    }
     return this.getState();
   }
 
@@ -403,6 +420,11 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       // the message before the connection failed. Do not fall back and risk a
       // duplicate; only an explicit DingTalk rejection is safe to reroute.
       const response = await this.host.httpPostJson(route.webhook, body);
+      // httpPostJson returns { error: string } when JSON.parse fails on the
+      // response body. Treat that as a transport error rather than silently
+      // accepting a 200 response whose body was not actually valid JSON.
+      const parseError = httpPostJsonError(response.body);
+      if (parseError) throw new Error(parseError);
       const apiError = dingTalkApiError(response.body);
       if (
         response.status >= 200 &&
@@ -608,6 +630,15 @@ function dingTalkApiError(body: unknown): string | null {
   return `DINGTALK_API_${String(code)}`;
 }
 
+// Detect the { error: string } sentinel that httpPostJson returns when the
+// response body cannot be parsed as JSON. Returns an error code string when
+// the body represents a transport-level parse failure, null otherwise.
+function httpPostJsonError(body: unknown): string | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const error = (body as Record<string, unknown>).error;
+  return typeof error === "string" && error ? "DINGTALK_HTTP_PARSE_ERROR" : null;
+}
+
 function assertProactiveResponse(response: {
   status: number;
   body: unknown;
@@ -615,6 +646,11 @@ function assertProactiveResponse(response: {
   if (response.status < 200 || response.status >= 300) {
     throw new Error(`DINGTALK_PROACTIVE_HTTP_${response.status}`);
   }
+  // httpPostJson returns { error: string } when the response body cannot be
+  // parsed as JSON. A 200 response with a parse failure is not a real success;
+  // reject it before inspecting structured fields.
+  const parseError = httpPostJsonError(response.body);
+  if (parseError) throw new Error(parseError);
   if (
     !response.body ||
     typeof response.body !== "object" ||
