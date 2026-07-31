@@ -1,45 +1,108 @@
 import type { ImUiTextPack } from '../shared/types';
+import { getResolvedMainLocale } from '../../i18n';
 import { ui as wechatUi } from '../wechat/uiText';
+import { DINGTALK_UI_TEXT_CATALOG, type DingTalkUiTextCatalog } from './uiTextCatalog';
+
+type TemplateVars = Record<string, string | number>;
+
+function format(template: string, vars: TemplateVars = {}): string {
+  let value = template;
+  for (const [key, replacement] of Object.entries(vars)) {
+    value = value.replaceAll(`{{${key}}}`, () => String(replacement));
+  }
+  return value;
+}
+
+function currentCopy(): DingTalkUiTextCatalog {
+  return DINGTALK_UI_TEXT_CATALOG[getResolvedMainLocale()];
+}
 
 /**
- * DingTalk's first milestone is text-only. Card copy remains in the structural
- * contract but cannot be reached because the adapter disables rich commands.
+ * DingTalk's first milestone is text-only. Reachable slash/agent copy is
+ * resolved at send time from the current main-process locale. Card copy stays
+ * in the structural contract but is unreachable because rich commands are
+ * disabled by the adapter.
  */
 export const ui = {
   ...wechatUi,
   slash: {
     ...wechatUi.slash,
-    help: `🤖 钉钉单聊目前支持：
-
-/new         开个新会话（清掉当前上下文）
-/help        查看帮助
-
-任务运行中可以发送 \`!stop\`，中止当前任务并清空排队消息。
-
-直接发文字就可以开始聊天。`,
-    unknownCommand: (cmd: string) =>
-      `钉钉简单聊天暂不支持 \`${cmd}\`。目前可用：/new、/help、!stop`,
-    detachedBySlash: '当前钉钉版本暂不支持远程接管。',
-    detachedByRevoke: 'desktop 已收回远程接管。',
-    notAttached: '当前钉钉版本暂不支持远程接管。',
+    get new() {
+      return currentCopy().slash.newConversation;
+    },
+    get help() {
+      return currentCopy().slash.help;
+    },
+    unknownCommand: (command: string) =>
+      format(currentCopy().slash.unknownCommand, { command }),
+    get detachedBySlash() {
+      return currentCopy().slash.remoteControlUnsupported;
+    },
+    get detachedByRevoke() {
+      return currentCopy().slash.remoteControlRevoked;
+    },
+    get notAttached() {
+      return currentCopy().slash.remoteControlUnsupported;
+    },
   },
   agent: {
     ...wechatUi.agent,
+    get completedNoText() {
+      return currentCopy().agent.completedNoText;
+    },
+    runtimeError: (error: string) => format(currentCopy().agent.runtimeError, { error }),
+    sendInternalError: (error: string) =>
+      format(currentCopy().agent.sendInternalError, { error }),
+    get apiKeyMissing() {
+      return currentCopy().agent.apiKeyMissing;
+    },
     authMissing: (details) => {
-      const provider = details.providerLabel ?? details.providerId ?? '当前供应商';
+      const copy = currentCopy().agent;
+      const provider = details.providerLabel ?? details.providerId ?? copy.providerFallback;
       const reason =
         details.missing === 'gateway-key'
-          ? '需要先配置 Cindy AI Key'
+          ? copy.authReason.gatewayKey
           : details.missing === 'provider-key'
-            ? '还没有配置该供应商的 API Key'
+            ? copy.authReason.providerKey
             : details.missing === 'provider-disconnected'
-              ? '未连接或连接已失效'
-              : `需要先登录 ${details.agentKind} 凭证`;
-      return `⚠️ 当前钉钉会话使用供应商「${provider}」（${details.model}），${reason}。\n请在 desktop 的 Settings → 模型供应商中修复认证；新会话配置变更后请发送 \`/new\`。`;
+              ? copy.authReason.providerDisconnected
+              : format(copy.authReason.agentCredential, { agentKind: details.agentKind });
+      return format(copy.authMissing, {
+        provider,
+        model: details.model,
+        reason,
+      });
     },
-    unsupportedOnly: (entries) =>
-      `🙏 钉钉简单聊天目前只支持文字消息。\n未处理：${entries.map((entry) => entry.label).join('、')}`,
-    unsupportedNotice: (entries) =>
-      `ℹ️ 钉钉简单聊天暂未处理：${entries.map((entry) => entry.label).join('、')}。其余文字继续处理。`,
+    get controlInProgress() {
+      return currentCopy().agent.controlInProgress;
+    },
+    get credentialBusy() {
+      return currentCopy().agent.credentialBusy;
+    },
+    queuedNotice: (position: number) =>
+      format(currentCopy().agent.queuedNotice, { position }),
+    stopDone: (droppedQueued: number) =>
+      droppedQueued > 0
+        ? format(currentCopy().agent.stopDoneWithQueue, { count: droppedQueued })
+        : currentCopy().agent.stopDone,
+    get stopIdle() {
+      return currentCopy().agent.stopIdle;
+    },
+    scheduledTaskHeader: (name: string | null) =>
+      name
+        ? format(currentCopy().agent.scheduledTaskHeaderNamed, { name })
+        : currentCopy().agent.scheduledTaskHeader,
+    unsupportedOnly: (entries) => {
+      const copy = currentCopy().agent;
+      return format(copy.unsupportedOnly, {
+        entries: entries.map((entry) => entry.label).join(copy.listSeparator),
+      });
+    },
+    unsupportedNotice: (entries) => {
+      const copy = currentCopy().agent;
+      return format(copy.unsupportedNotice, {
+        entries: entries.map((entry) => entry.label).join(copy.listSeparator),
+      });
+    },
   },
 } satisfies ImUiTextPack;
