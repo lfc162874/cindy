@@ -35,7 +35,7 @@ import {
 import { startThreadControlFlow } from './controlFlow';
 import { enterControl } from './controlState';
 import { bindingStore, executeDetach } from '../binding';
-import type { IdentityKey } from '@cindy/im';
+import type { IdentityKey, IMDeliveryContext } from '@cindy/im';
 import type { ImChannelAdapter } from './types';
 
 /** Quick text-only check; treat anything starting with '/' (no spaces before) as a command. */
@@ -46,6 +46,8 @@ export function looksLikeSlashCommand(text: string): boolean {
 export interface SlashCtx {
   botContextId: string;
   userId: string;
+  /** 入站机器人代次；钉钉等需要代次校验的渠道用它约束出站发送。 */
+  deliveryContext?: IMDeliveryContext;
 }
 
 export interface ImSlashHandlers {
@@ -74,9 +76,15 @@ export function createSlashHandlers(
    * **粗体** / `code` / emoji, 渠道原生 text 不渲染 markdown 标记会显示成原文。
    * markdown 同样兼容纯文本: 没标记的字符串显示效果跟 text 一致。
    */
-  async function safeSendText(userId: string, text: string): Promise<void> {
+  async function safeSendText(
+    userId: string,
+    text: string,
+    deliveryContext?: IMDeliveryContext,
+  ): Promise<void> {
     try {
-      await im.sendMarkdownText(userId, text);
+      await im.sendMarkdownText(userId, text, {
+        ...(deliveryContext ? { deliveryContext } : {}),
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(`safeSendText failed (non-fatal): ${msg}`);
@@ -88,23 +96,23 @@ export function createSlashHandlers(
     log.info(`slash cmd=${cmd} userId=...${ctx.userId.slice(-8)}`);
 
     if (adapter.supportsRichCommands === false && cmd !== '/help' && cmd !== '/new') {
-      await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
+      await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd), ctx.deliveryContext);
       return true;
     }
 
     switch (cmd) {
       case '/help':
-        await safeSendText(ctx.userId, ui.slash.help);
+        await safeSendText(ctx.userId, ui.slash.help, ctx.deliveryContext);
         return true;
 
       case '/start': {
         // Telegram 私聊首次交互必发 /start(START 按钮) — 有欢迎语的渠道回
         // 欢迎语, 其它渠道走未知命令提示。
         if (ui.slash.start) {
-          await safeSendText(ctx.userId, ui.slash.start);
+          await safeSendText(ctx.userId, ui.slash.start, ctx.deliveryContext);
           return true;
         }
-        await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
+        await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd), ctx.deliveryContext);
         return true;
       }
 
@@ -123,14 +131,14 @@ export function createSlashHandlers(
           log.error(`/stop stopActiveTurn threw: ${msg}`);
           reply = ui.agent.sendInternalError(msg);
         }
-        await safeSendText(ctx.userId, reply);
+        await safeSendText(ctx.userId, reply, ctx.deliveryContext);
         return true;
       }
 
       case '/new': {
         // thread = session 模型: 发新顶层消息即新会话, /new 无意义 → 废弃提示。
         if (threadScoped && threadUi) {
-          await safeSendText(ctx.userId, threadUi.newDeprecated);
+          await safeSendText(ctx.userId, threadUi.newDeprecated, ctx.deliveryContext);
           return true;
         }
         const prepared = await repo.prepareNewSession(ctx.botContextId, ctx.userId);
@@ -145,6 +153,7 @@ export function createSlashHandlers(
                   model: prepared.model,
                 })
               : ui.agent.apiKeyMissing,
+            ctx.deliveryContext,
           );
           return true;
         }
@@ -156,7 +165,7 @@ export function createSlashHandlers(
           await resetSessionToDefaults(row.id, adapter.config, prepared, adapter.channel);
         }
         await turnRunner.disposeOneSession(row.id);
-        await safeSendText(ctx.userId, ui.slash.new);
+        await safeSendText(ctx.userId, ui.slash.new, ctx.deliveryContext);
         return true;
       }
 
@@ -164,12 +173,12 @@ export function createSlashHandlers(
         // thread 模型: slash 命令不携带 thread 上下文(Slack 平台限制), 无法定位
         // 目标 thread/session;不拦的话 resolveRouteTarget 会误建空 scope session。
         if (threadScoped && threadUi) {
-          await safeSendText(ctx.userId, threadUi.perThreadConfigUnsupported);
+          await safeSendText(ctx.userId, threadUi.perThreadConfigUnsupported, ctx.deliveryContext);
           return true;
         }
         const target = await turnRunner.resolveRouteTarget(ctx.botContextId, ctx.userId);
         if (!target) {
-          await safeSendText(ctx.userId, ui.agent.apiKeyMissing);
+          await safeSendText(ctx.userId, ui.agent.apiKeyMissing, ctx.deliveryContext);
           return true;
         }
         const { row } = target;
@@ -224,7 +233,7 @@ export function createSlashHandlers(
         if (threadScoped && threadUi) {
           const all = bindingStore.listByIdentity(channel, ctx.botContextId, ctx.userId);
           if (all.length === 0) {
-            await safeSendText(ctx.userId, threadUi.exctrNothing);
+            await safeSendText(ctx.userId, threadUi.exctrNothing, ctx.deliveryContext);
             return true;
           }
           let detached = 0;
@@ -237,7 +246,7 @@ export function createSlashHandlers(
               log.error(`${cmd} executeDetach(scope) threw: ${msg}`);
             }
           }
-          await safeSendText(ctx.userId, threadUi.exctrAllDone(detached));
+          await safeSendText(ctx.userId, threadUi.exctrAllDone(detached), ctx.deliveryContext);
           return true;
         }
         // 结束当前 (bot, owner) 的接管, 让后续消息回到渠道默认 session。
@@ -251,14 +260,14 @@ export function createSlashHandlers(
         try {
           const result = await executeDetach(identity, `${channel}-slash`);
           if (!result.wasAttached) {
-            await safeSendText(ctx.userId, ui.slash.notAttached);
+            await safeSendText(ctx.userId, ui.slash.notAttached, ctx.deliveryContext);
           } else {
-            await safeSendText(ctx.userId, ui.slash.detachedBySlash);
+            await safeSendText(ctx.userId, ui.slash.detachedBySlash, ctx.deliveryContext);
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           log.error(`${cmd} executeDetach threw: ${msg}`);
-          await safeSendText(ctx.userId, `❌ 结束接管失败：${msg}`);
+          await safeSendText(ctx.userId, `❌ 结束接管失败：${msg}`, ctx.deliveryContext);
         }
         return true;
       }
@@ -317,7 +326,7 @@ export function createSlashHandlers(
         // 才放行; 选中走 control:session-pick 接管路径。
         const recentUi = ui.cards.control.recentSessions;
         if (!recentUi) {
-          await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
+          await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd), ctx.deliveryContext);
           return true;
         }
         const recent = await listRecentSessionsForPicker();
@@ -339,7 +348,7 @@ export function createSlashHandlers(
         // 未知命令处理, 不暴露半成品入口。
         const projectUi = ui.cards.project;
         if (!adapter.projectSwitching || !projectUi) {
-          await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
+          await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd), ctx.deliveryContext);
           return true;
         }
         // /ctr 接管期间语义冲突(消息在被接管的 desktop 会话里跑): 先 /exctr。
@@ -349,7 +358,7 @@ export function createSlashHandlers(
           userId: ctx.userId,
         };
         if (bindingStore.get(identity)) {
-          await safeSendText(ctx.userId, projectUi.attachedUnsupported);
+          await safeSendText(ctx.userId, projectUi.attachedUnsupported, ctx.deliveryContext);
           return true;
         }
         const [projects, current] = await Promise.all([
@@ -377,12 +386,12 @@ export function createSlashHandlers(
 
       case '/permission': {
         if (threadScoped && threadUi) {
-          await safeSendText(ctx.userId, threadUi.perThreadConfigUnsupported);
+          await safeSendText(ctx.userId, threadUi.perThreadConfigUnsupported, ctx.deliveryContext);
           return true;
         }
         const target = await turnRunner.resolveRouteTarget(ctx.botContextId, ctx.userId);
         if (!target) {
-          await safeSendText(ctx.userId, ui.agent.apiKeyMissing);
+          await safeSendText(ctx.userId, ui.agent.apiKeyMissing, ctx.deliveryContext);
           return true;
         }
         const { row } = target;
@@ -404,7 +413,7 @@ export function createSlashHandlers(
       }
 
       default:
-        await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd));
+        await safeSendText(ctx.userId, ui.slash.unknownCommand(cmd), ctx.deliveryContext);
         return true;
     }
   }

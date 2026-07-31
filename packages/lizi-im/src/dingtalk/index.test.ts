@@ -643,6 +643,72 @@ describe("DingTalkIM", () => {
     await im.dispose();
   });
 
+  it("allows an old turn to deliver after a failed config replacement rolls back", async () => {
+    // 保存新凭证连接失败时，回滚应恢复原投递代次，使旧 turn 仍能投递。
+    let connectCall = 0;
+    let firstClient: FakeClient | null = null;
+    const { im, posts } = createHarness({
+      clientFactory: () => {
+        connectCall += 1;
+        const c = new FakeClient();
+        if (connectCall === 1) firstClient = c;
+        // 第二次连接（新凭证）失败，触发回滚。
+        if (connectCall === 2) {
+          c.connect = async () => {
+            throw new Error("DINGTALK_CONNECT_FAILED");
+          };
+        }
+        return c;
+      },
+    });
+
+    // 保存初始工作凭证。
+    await im.saveConfig("ding-client-a", "invalid-test-secret", "staff-1");
+    // 入站一条消息，捕获此时投递代次。
+    const deliveryContext = await receiveDeliveryContext(
+      im,
+      firstClient!,
+      {
+        robotCode: "ding-client-a",
+        sessionWebhook: "",
+        sessionWebhookExpiredTime: 0,
+      },
+    );
+
+    // 尝试保存新凭证（会连接失败并回滚）。
+    await im.saveConfig("ding-client-b", "invalid-test-secret", "staff-1");
+
+    // 回滚后旧凭证已恢复；旧 turn 的代次应仍然有效。
+    await expect(
+      im.sendText("staff-1", "old turn result", {
+        deliveryContext,
+      }),
+    ).resolves.toEqual({ messageId: expect.any(String) });
+    expect(posts).toHaveLength(1);
+    await im.dispose();
+  });
+
+  it("rejects an outbound sendText whose deliveryContext belongs to a different bot", async () => {
+    // 入站时绑定的代次与当前机器人不一致时，sendText 也必须 fail closed。
+    const { im, client, posts } = createHarness();
+    await im.saveConfig("ding-client-a", "invalid-test-secret", "staff-1");
+    const deliveryContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client-a",
+      sessionWebhook: "",
+      sessionWebhookExpiredTime: 0,
+    });
+
+    // 切换到机器人 B（同 owner）。
+    await im.saveConfig("ding-client-b", "invalid-test-secret", "staff-1");
+
+    // 旧 turn 的 deliveryContext 仍属 A，应被拒绝。
+    await expect(
+      im.sendText("staff-1", "stale reply", { deliveryContext }),
+    ).rejects.toThrow("DINGTALK_STALE_TURN");
+    expect(posts).toHaveLength(0);
+    await im.dispose();
+  });
+
   it("stops after a non-retryable chunk failure and sends an incomplete notice", async () => {
     // 分块发送时若中间段失败（且不属于可重试错误），应立即停止后续分块，
     // 并发送一条简短提示告知用户回复不完整。

@@ -17,6 +17,7 @@ export type {
   RichChannelIM,
   ImFinalOutput,
   ImOutputDriver,
+  ImSendOpts,
 } from './channelIM.js';
 
 export type { Logger } from './logger.js';

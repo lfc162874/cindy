@@ -168,7 +168,7 @@ describe('IM slash commands', () => {
 
     expect(repo.createSession).not.toHaveBeenCalled();
     expect(mocks.resetSessionToDefaults).not.toHaveBeenCalled();
-    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', ui.agent.apiKeyMissing);
+    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', ui.agent.apiKeyMissing, expect.objectContaining({}));
   });
 
   it('explains the persisted provider when /new defaults are unauthenticated', async () => {
@@ -195,6 +195,7 @@ describe('IM slash commands', () => {
         providerLabel: '我的 OpenAI',
         missing: 'provider-key',
       }),
+      expect.objectContaining({}),
     );
     expect(mocks.resetSessionToDefaults).not.toHaveBeenCalled();
   });
@@ -212,7 +213,7 @@ describe('IM slash commands', () => {
       prepared,
       'feishu',
     );
-    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', ui.slash.new);
+    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', ui.slash.new, expect.objectContaining({}));
   });
 
   it('does not send /model picker when creating the target session would fail auth', async () => {
@@ -228,7 +229,7 @@ describe('IM slash commands', () => {
 
     expect(cards.buildModelPickerCard).not.toHaveBeenCalled();
     expect(mocks.sendInteractiveCard).not.toHaveBeenCalled();
-    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', ui.agent.apiKeyMissing);
+    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', ui.agent.apiKeyMissing, expect.objectContaining({}));
   });
 
   it('does not send /permission picker when creating the target session would fail auth', async () => {
@@ -244,7 +245,7 @@ describe('IM slash commands', () => {
 
     expect(cards.buildPermissionModePickerCard).not.toHaveBeenCalled();
     expect(mocks.sendInteractiveCard).not.toHaveBeenCalled();
-    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', ui.agent.apiKeyMissing);
+    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', ui.agent.apiKeyMissing, expect.objectContaining({}));
   });
 
   it('/stop 与 !stop 同语义 — 中止当前 turn 并回执', async () => {
@@ -255,7 +256,7 @@ describe('IM slash commands', () => {
     await handlers.handleSlashCommand('/stop', { botContextId: 'bot', userId: 'ou_user' });
 
     expect(stopActiveTurn).toHaveBeenCalledWith({ botContextId: 'bot', userId: 'ou_user' });
-    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', ui.agent.stopDone(2));
+    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', ui.agent.stopDone(2), expect.objectContaining({}));
   });
 
   it('/start 有欢迎语的渠道回欢迎语, 否则回未知命令', async () => {
@@ -265,7 +266,7 @@ describe('IM slash commands', () => {
       } as Partial<ImChannelAdapter>,
     });
     await handlers.handleSlashCommand('/start', { botContextId: 'bot', userId: 'ou_user' });
-    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', 'WELCOME');
+    expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', 'WELCOME', expect.objectContaining({}));
 
     vi.clearAllMocks();
     mocks.sendMarkdownText.mockResolvedValue(undefined);
@@ -274,6 +275,7 @@ describe('IM slash commands', () => {
     expect(mocks.sendMarkdownText).toHaveBeenCalledWith(
       'ou_user',
       ui.slash.unknownCommand('/start'),
+      expect.objectContaining({}),
     );
   });
 
@@ -305,6 +307,7 @@ describe('IM slash commands', () => {
       expect(mocks.sendMarkdownText).toHaveBeenCalledWith(
         'ou_user',
         ui.slash.unknownCommand('/project'),
+        expect.objectContaining({}),
       );
     });
 
@@ -327,7 +330,7 @@ describe('IM slash commands', () => {
       await handlers.handleSlashCommand('/project', { botContextId: 'bot', userId: 'ou_user' });
 
       expect(cards.buildProjectPickerCard).not.toHaveBeenCalled();
-      expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', 'attached-unsupported');
+      expect(mocks.sendMarkdownText).toHaveBeenCalledWith('ou_user', 'attached-unsupported', expect.objectContaining({}));
     });
   });
 });

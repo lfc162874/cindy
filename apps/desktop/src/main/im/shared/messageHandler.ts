@@ -82,6 +82,7 @@ export function createMessageHandler(
       try {
         await im.sendMarkdownText(event.senderId, ui.agent.controlInProgress, {
           threadTs: event.scopeKey,
+          ...(event.deliveryContext ? { deliveryContext: event.deliveryContext } : {}),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -112,7 +113,10 @@ export function createMessageHandler(
         reply = ui.agent.sendInternalError(msg);
       }
       try {
-        await im.sendMarkdownText(event.senderId, reply, { threadTs: event.scopeKey });
+        await im.sendMarkdownText(event.senderId, reply, {
+          threadTs: event.scopeKey,
+          ...(event.deliveryContext ? { deliveryContext: event.deliveryContext } : {}),
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.warn(`!stop reply failed (non-fatal): ${msg}`);
@@ -126,6 +130,7 @@ export function createMessageHandler(
         await slash.handleSlashCommand(event.text, {
           botContextId: event.contextId,
           userId: event.senderId,
+          ...(event.deliveryContext ? { deliveryContext: event.deliveryContext } : {}),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -141,6 +146,7 @@ export function createMessageHandler(
       try {
         await im.sendText(event.senderId, ui.agent.unsupportedOnly(event.unsupported), {
           threadTs: event.scopeKey,
+          ...(event.deliveryContext ? { deliveryContext: event.deliveryContext } : {}),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -159,6 +165,7 @@ export function createMessageHandler(
       try {
         await im.sendText(event.senderId, ui.agent.unsupportedNotice(event.unsupported), {
           threadTs: event.scopeKey,
+          ...(event.deliveryContext ? { deliveryContext: event.deliveryContext } : {}),
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -217,6 +224,7 @@ export function createMessageHandler(
       try {
         await im.sendText(event.senderId, ui.agent.sendInternalError(msg), {
           threadTs: event.scopeKey,
+          ...(event.deliveryContext ? { deliveryContext: event.deliveryContext } : {}),
         });
       } catch {
         /* swallow */

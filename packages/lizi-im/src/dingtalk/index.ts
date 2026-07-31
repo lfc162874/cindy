@@ -7,7 +7,7 @@ import {
 } from "dingtalk-stream";
 
 import { BaseIM } from "../BaseIM.js";
-import type { RichChannelIM, ImFinalOutput } from "../channelIM.js";
+import type { RichChannelIM, ImFinalOutput, ImSendOpts } from "../channelIM.js";
 import type {
   IMCardActionEvent,
   DingTalkDeliveryContext,
@@ -106,7 +106,7 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   private ownerUserId = "";
   // 标识当前机器人身份配置的代次。它与网络连接代次分离：
   // 同配置重连允许旧 turn 继续投递，Client ID / Owner 变化则让旧 turn 立即失效。
-  private botGenerationToken = randomUUID();
+  private botGenerationToken: string = randomUUID();
   private connectionVersion = 0;
   private proactiveAccessToken: string | null = null;
   private proactiveAccessTokenPromise: Promise<string> | null = null;
@@ -199,6 +199,10 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       throw new Error("DINGTALK_CREDENTIAL_SAVE_FAILED");
     }
 
+    // 保存切换前的投递代次；若新凭证连接失败回滚，必须恢复原代次，
+    // 否则旧 turn 持有的 token 会被判为 DINGTALK_STALE_TURN 而丢弃，
+    // 即使旧凭证已恢复连接也无法投递。
+    const previousGenerationToken = this.botGenerationToken;
     this.setRuntimeIdentity(nextClientId, nextOwnerUserId);
     await this.connect({
       clientId: nextClientId,
@@ -214,9 +218,10 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       this.restoreSecret(CLIENT_ID_SECRET_KEY, previous.clientId);
       this.restoreSecret(CLIENT_SECRET_SECRET_KEY, previous.clientSecret);
       this.restoreSecret(OWNER_USER_ID_SECRET_KEY, previousOwnerUserId);
-      this.setRuntimeIdentity(
+      this.restoreRuntimeIdentity(
         previous.clientId,
         previousOwnerUserId?.trim() || "",
+        previousGenerationToken,
       );
       try {
         await this.connect(previous);
@@ -276,11 +281,15 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     return this.status;
   }
 
-  sendText(userId: string, text: string): Promise<{ messageId: string }> {
+  sendText(
+    userId: string,
+    text: string,
+    opts?: ImSendOpts,
+  ): Promise<{ messageId: string }> {
     return this.sendTextForDelivery(
       userId,
       text,
-      this.currentDeliveryContext(),
+      opts?.deliveryContext ?? this.currentDeliveryContext(),
     );
   }
 
@@ -304,11 +313,12 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   sendMarkdownText(
     userId: string,
     markdown: string,
+    opts?: ImSendOpts,
   ): Promise<{ messageId: string }> {
     return this.sendMarkdownTextForDelivery(
       userId,
       markdown,
-      this.currentDeliveryContext(),
+      opts?.deliveryContext ?? this.currentDeliveryContext(),
     );
   }
 
@@ -415,7 +425,12 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     }
   }
 
-  sendFile(): Promise<SendFileResult> {
+  sendFile(
+    _userId: string,
+    _absPath: string,
+    _displayName?: string,
+    _opts?: ImSendOpts,
+  ): Promise<SendFileResult> {
     return Promise.resolve({ ok: false, reason: "SEND_FAIL" });
   }
 
@@ -537,6 +552,21 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     }
     this.clientId = clientId;
     this.ownerUserId = ownerUserId;
+  }
+
+  /**
+   * 配置回滚专用：恢复旧身份时连同投递代次一起还原，
+   * 而不是新生成一个 token。否则回滚前仍在运行的旧 turn
+   * 会被 assertCurrentDelivery 判为过期而丢弃最终回复。
+   */
+  private restoreRuntimeIdentity(
+    clientId: string,
+    ownerUserId: string,
+    generationToken: string,
+  ): void {
+    this.clientId = clientId;
+    this.ownerUserId = ownerUserId;
+    this.botGenerationToken = generationToken;
   }
 
   private currentDeliveryContext(): DingTalkDeliveryContext {

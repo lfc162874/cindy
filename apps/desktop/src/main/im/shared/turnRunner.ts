@@ -546,7 +546,7 @@ export function createTurnRunner(
       const created = await createAuthenticatedDefaultRouteTarget(botContextId, userId, scopeKey);
       if (!created.target) {
         if (args.queueMode === 'internal') {
-          await replyMissingAuth(userId, created.missingAuth, scopeKey);
+          await replyMissingAuth(userId, created.missingAuth, scopeKey, false, args.deliveryContext);
         }
         return { kind: 'rejected', reason: 'missing_auth' };
       }
@@ -562,6 +562,7 @@ export function createTurnRunner(
             { ...auth, agentKind: row.agentKind, model: row.model },
             scopeKey,
             target.attached,
+            args.deliveryContext,
           );
         }
         return { kind: 'rejected', reason: 'missing_auth' };
@@ -1025,6 +1026,7 @@ export function createTurnRunner(
     try {
       await im.sendMarkdownText(userId, ui.agent.queuedNotice(position), {
         threadTs: item.turn.scopeKey,
+        ...(item.turn.deliveryContext ? { deliveryContext: item.turn.deliveryContext } : {}),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1088,6 +1090,7 @@ export function createTurnRunner(
     auth: ImAuthRouteStatus & { agentKind: AgentKind; model: string },
     scopeKey?: string,
     attached = false,
+    deliveryContext?: IMDeliveryContext,
   ): Promise<void> {
     log.info(
       `no auth configured for agent=${auth.agentKind} provider=${auth.providerId ?? 'default'} ` +
@@ -1095,7 +1098,10 @@ export function createTurnRunner(
     );
     try {
       const message = ui.agent.authMissing?.({ ...auth, attached }) ?? ui.agent.apiKeyMissing;
-      await im.sendText(userId, message, { threadTs: scopeKey });
+      await im.sendText(userId, message, {
+        threadTs: scopeKey,
+        ...(deliveryContext ? { deliveryContext } : {}),
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(`apiKeyMissing send failed (non-fatal): ${msg}`);
@@ -1106,7 +1112,10 @@ export function createTurnRunner(
     log.info(`session wiring hit credential busy for userId=...${userId.slice(-8)}`);
     await completeTurnCallbackAfterAck(turn);
     try {
-      await im.sendText(userId, ui.agent.credentialBusy, { threadTs: turn.scopeKey });
+      await im.sendText(userId, ui.agent.credentialBusy, {
+        threadTs: turn.scopeKey,
+        ...(turn.deliveryContext ? { deliveryContext: turn.deliveryContext } : {}),
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(`credentialBusy send failed (non-fatal): ${msg}`);
@@ -1998,6 +2007,7 @@ export function createTurnRunner(
       try {
         await im.sendText(userId, `❌ 启动 agent 失败：${failure.reason}`, {
           threadTs: state.scopeKey,
+          ...(failure.turn.deliveryContext ? { deliveryContext: failure.turn.deliveryContext } : {}),
         });
       } catch {
         /* 忽略失败：派发失败提示不能再阻塞收口。 */
@@ -2253,6 +2263,7 @@ export function createTurnRunner(
         } else {
           await output.im.sendText(userId, '✅ (本轮无文本输出)', {
             threadTs: state.scopeKey,
+            ...(turn.deliveryContext ? { deliveryContext: turn.deliveryContext } : {}),
           });
         }
       } catch {
@@ -2333,6 +2344,7 @@ export function createTurnRunner(
         } else {
           await output.im.sendText(userId, `❌ 错误：${msg}`, {
             threadTs: state.scopeKey,
+            ...(turn?.deliveryContext ? { deliveryContext: turn.deliveryContext } : {}),
           });
         }
       } catch {

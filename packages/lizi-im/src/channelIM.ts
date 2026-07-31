@@ -26,6 +26,12 @@ import type {
   StreamingTextHandle,
 } from './types.js';
 
+/** 出站发送选项。deliveryContext 仅钉钉等需要代次校验的渠道使用。 */
+export interface ImSendOpts {
+  threadTs?: string;
+  deliveryContext?: IMDeliveryContext;
+}
+
 export interface TextChannelIM {
   /** 渠道名 ('feishu' / 'slack') — 与 IdentityKey.channel 同值域。 */
   readonly name: string;
@@ -44,14 +50,14 @@ export interface TextChannelIM {
   sendText(
     userId: string,
     text: string,
-    opts?: { threadTs?: string },
+    opts?: ImSendOpts,
   ): Promise<{ messageId: string }>;
 
   /** 渲染 markdown 的文本消息(粗体 / 行内 code / 链接等)。 */
   sendMarkdownText(
     userId: string,
     markdown: string,
-    opts?: { threadTs?: string },
+    opts?: ImSendOpts,
   ): Promise<{ messageId: string }>;
 
   /** 发送本地文件;失败原因见 SendFileResult.reason。 */
@@ -59,7 +65,7 @@ export interface TextChannelIM {
     userId: string,
     absPath: string,
     displayName?: string,
-    opts?: { threadTs?: string },
+    opts?: ImSendOpts,
   ): Promise<SendFileResult>;
 
   // ── optional capabilities ──────────────────────────────────────────────────
@@ -86,7 +92,7 @@ export interface RichChannelIM extends TextChannelIM {
   sendInteractiveCard(
     userId: string,
     spec: InteractiveCardSpec,
-    opts?: { threadTs?: string },
+    opts?: ImSendOpts,
   ): Promise<{ messageId: string }>;
 
   /** 原地替换一张已发出的交互卡片(spec 全量覆盖)。 */
@@ -99,7 +105,7 @@ export interface RichChannelIM extends TextChannelIM {
   startStreamingText(
     userId: string,
     initial?: string,
-    opts?: { threadTs?: string },
+    opts?: ImSendOpts,
   ): Promise<StreamingTextHandle>;
 
   /**
