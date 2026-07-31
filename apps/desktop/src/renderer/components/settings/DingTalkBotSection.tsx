@@ -10,7 +10,7 @@ import { ImDefaultSettingsSection } from './ImDefaultSettingsSection';
 
 const DEVELOPER_PORTAL_URL = 'https://open-dev.dingtalk.com/';
 
-const statusKey: Record<DiscordBotTransportStatus['kind'], string> = {
+const statusKey: Record<DingTalkBotTransportStatus['kind'], string> = {
   idle: 'settings.dingtalkBot.status.needsConfig',
   connecting: 'settings.dingtalkBot.status.connecting',
   connected: 'settings.dingtalkBot.status.connected',
@@ -18,7 +18,7 @@ const statusKey: Record<DiscordBotTransportStatus['kind'], string> = {
   error: 'settings.dingtalkBot.status.error',
 };
 
-function statusColor(status: DiscordBotTransportStatus): string {
+function statusColor(status: DingTalkBotTransportStatus): string {
   if (status.kind === 'connected') return 'var(--settings-badge-connected)';
   if (status.kind === 'error' || status.kind === 'conflict') return 'var(--settings-badge-error)';
   if (status.kind === 'connecting') return 'var(--settings-badge-saved)';
@@ -150,6 +150,17 @@ export function DingTalkBotSection({
               {showSecret ? <EyeOff size={18} /> : <Eye size={18} />}
             </button>
           </div>
+          <label className="text-12 font-medium text-[var(--settings-section-desc)]">
+            {t('settings.dingtalkBot.ownerUserIdLabel')}
+          </label>
+          <input
+            value={bot.ownerUserId}
+            onChange={(event) => bot.setOwnerUserId(event.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={t('settings.dingtalkBot.ownerUserIdPlaceholder')}
+            className="h-[42px] w-full rounded-full border border-[var(--settings-input-border)] bg-[var(--settings-input-bg)] px-[14px] text-13 text-[var(--settings-input-text)] outline-none placeholder:text-[var(--settings-input-placeholder)] focus:border-[var(--settings-input-border-focus)]"
+          />
           {bot.validationError ? (
             <p className="text-12 text-[var(--settings-error-text)]" role="alert">
               {bot.validationError}
@@ -186,7 +197,12 @@ export function DingTalkBotSection({
               <button
                 type="button"
                 onClick={() => void bot.save()}
-                disabled={!bot.clientId.trim() || !bot.clientSecret.trim() || bot.busy !== null}
+                disabled={
+                  !bot.clientId.trim() ||
+                  !bot.clientSecret.trim() ||
+                  !bot.ownerUserId.trim() ||
+                  bot.busy !== null
+                }
                 className={cn(
                   'inline-flex h-9 items-center gap-2 rounded-full border border-[var(--settings-btn-primary-border)] bg-[var(--settings-btn-primary-bg)] px-5 text-12 font-medium text-[var(--settings-btn-primary-text)] hover:bg-[var(--settings-btn-primary-hover-bg)]',
                   'disabled:cursor-not-allowed disabled:opacity-40',

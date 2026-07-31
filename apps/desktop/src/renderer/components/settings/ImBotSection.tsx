@@ -29,8 +29,14 @@ import { DiscordBotSection } from './DiscordBotSection';
 import { DingTalkBotSection } from './DingTalkBotSection';
 import { FeishuBotSection } from './FeishuBotSection';
 import { HookConnectionsSection } from './HookConnectionsSection';
+import { TelegramBotSection } from './TelegramBotSection';
 import { WechatBotSection } from './WechatBotSection';
-import { showCindyGroup, showDiscordBot, type ImBotIdentity } from './imBotVisibility';
+import {
+  showCindyGroup,
+  showDiscordBot,
+  showTelegramBot,
+  type ImBotIdentity,
+} from './imBotVisibility';
 
 /** 「IM 机器人」页内分栏 id(tab 与 ?imGroup= 参数共用)。 */
 export type ImBotSettingsGroup = 'cindy' | 'personal';
@@ -55,13 +61,19 @@ export function isImBotSettingsGroup(value: string | null): value is ImBotSettin
   return value === 'cindy' || value === 'personal';
 }
 
-/** 个人栏内容 —— 用户自配凭证的机器人(国区个人账号无 Discord)。 */
-function PersonalGroupContent({ showDiscord }: { showDiscord: boolean }) {
+/** 个人栏内容 —— 用户自配凭证的机器人(国区个人账号无 Discord/Telegram)。 */
+function PersonalGroupContent({
+  showDiscord,
+  showTelegram,
+}: {
+  showDiscord: boolean;
+  showTelegram: boolean;
+}) {
   const [expandedChannel, setExpandedChannel] = useState<
-    'wechat' | 'feishu' | 'dingtalk' | 'discord' | null
+    'wechat' | 'feishu' | 'dingtalk' | 'discord' | 'telegram' | null
   >(null);
 
-  const toggle = (channel: 'wechat' | 'feishu' | 'dingtalk' | 'discord') => {
+  const toggle = (channel: 'wechat' | 'feishu' | 'dingtalk' | 'discord' | 'telegram') => {
     setExpandedChannel((current) => (current === channel ? null : channel));
   };
 
@@ -77,6 +89,12 @@ function PersonalGroupContent({ showDiscord }: { showDiscord: boolean }) {
         <DiscordBotSection
           expanded={expandedChannel === 'discord'}
           onToggle={() => toggle('discord')}
+        />
+      )}
+      {showTelegram && (
+        <TelegramBotSection
+          expanded={expandedChannel === 'telegram'}
+          onToggle={() => toggle('telegram')}
         />
       )}
     </div>
@@ -99,6 +117,7 @@ export function ImBotSection({
   };
   const cindyGroupAvailable = showCindyGroup(identity);
   const discordVisible = showDiscordBot(identity);
+  const telegramVisible = showTelegramBot(identity);
   const availableGroups = cindyGroupAvailable
     ? IM_BOT_SETTINGS_GROUPS
     : PERSONAL_ONLY_IM_BOT_SETTINGS_GROUPS;
@@ -170,7 +189,7 @@ export function ImBotSection({
         {effectiveGroup === 'cindy' ? (
           <HookConnectionsSection />
         ) : (
-          <PersonalGroupContent showDiscord={discordVisible} />
+          <PersonalGroupContent showDiscord={discordVisible} showTelegram={telegramVisible} />
         )}
       </div>
     </div>

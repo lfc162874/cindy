@@ -34,6 +34,7 @@ export function useDingTalkBot() {
   const [state, setState] = useState<DingTalkBotState>(() => cachedState ?? EMPTY_STATE);
   const [clientId, setClientId] = useState(() => cachedState?.clientId ?? '');
   const [clientSecret, setClientSecret] = useState('');
+  const [ownerUserId, setOwnerUserId] = useState(() => cachedState?.ownerUserId ?? '');
   const [validationError, setValidationError] = useState<string | null>(null);
   const [busy, setBusy] = useState<'save' | 'reconnect' | 'clear' | null>(null);
 
@@ -41,6 +42,7 @@ export function useDingTalkBot() {
     cachedState = next;
     setState(next);
     setClientId(next.clientId ?? '');
+    setOwnerUserId(next.ownerUserId ?? '');
   }, []);
 
   useEffect(() => {
@@ -62,7 +64,8 @@ export function useDingTalkBot() {
     if (busy) return false;
     const nextClientId = clientId.trim();
     const nextSecret = clientSecret.trim();
-    if (!nextClientId || !nextSecret) {
+    const nextOwnerUserId = ownerUserId.trim();
+    if (!nextClientId || !nextSecret || !nextOwnerUserId) {
       setValidationError(t('logic.validation.dingtalkFieldsRequired'));
       return false;
     }
@@ -72,6 +75,7 @@ export function useDingTalkBot() {
       const next = await window.electronAPI.dingtalkBot.save({
         clientId: nextClientId,
         clientSecret: nextSecret,
+        ownerUserId: nextOwnerUserId,
       });
       applyState(next);
       setClientSecret('');
@@ -88,7 +92,7 @@ export function useDingTalkBot() {
     } finally {
       setBusy(null);
     }
-  }, [applyState, busy, clientId, clientSecret, t]);
+  }, [applyState, busy, clientId, clientSecret, ownerUserId, t]);
 
   const reconnect = useCallback(async () => {
     if (busy) return;
@@ -115,6 +119,7 @@ export function useDingTalkBot() {
       applyState(await window.electronAPI.dingtalkBot.clear());
       setClientId('');
       setClientSecret('');
+      setOwnerUserId('');
       setValidationError(null);
       toast.success(t('logic.toasts.dingtalkBotCleared'));
     } catch (error) {
@@ -135,6 +140,11 @@ export function useDingTalkBot() {
     clientSecret,
     setClientSecret: (value: string) => {
       setClientSecret(value);
+      setValidationError(null);
+    },
+    ownerUserId,
+    setOwnerUserId: (value: string) => {
+      setOwnerUserId(value);
       setValidationError(null);
     },
     validationError,

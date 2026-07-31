@@ -42,6 +42,16 @@ export type { DiscordIMOptions } from './discord/index.js';
 export { DingTalkIM, createDingTalkIM } from './dingtalk/index.js';
 export type { DingTalkBotState, DingTalkIMOptions, DingTalkStreamClient } from './dingtalk/index.js';
 
+export { TelegramIM, createTelegramIM } from './telegram/index.js';
+export type { TelegramIMOptions, TelegramGroupWindowEntry } from './telegram/index.js';
+export { TELEGRAM_DEFAULT_BEHAVIOR } from './telegram/index.js';
+export type { TelegramBehaviorConfig } from './telegram/index.js';
+export {
+  decodeLaneUserId as decodeTelegramLaneUserId,
+  encodeLaneUserId as encodeTelegramLaneUserId,
+  decodeMessageId as decodeTelegramMessageId,
+} from './telegram/codec.js';
+
 export type {
   IdentityKey,
   BindingStore,

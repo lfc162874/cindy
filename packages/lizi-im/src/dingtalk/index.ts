@@ -20,7 +20,6 @@ import { chunkDingTalkMarkdown, sanitizeDingTalkMarkdown } from "./chunk.js";
 import {
   isDingTalkDirectMessage,
   parseDingTalkRobotPayload,
-  senderUserId,
   toDingTalkMessageEvent,
   type DingTalkRobotPayload,
 } from "./inbound.js";
@@ -32,6 +31,9 @@ const CONNECTION_TIMEOUT_MS = 15_000;
 const CONNECTION_POLL_MS = 100;
 const STATUS_POLL_MS = 1_000;
 const WEBHOOK_HOSTS = new Set(["oapi.dingtalk.com", "api.dingtalk.com"]);
+const PROACTIVE_DIRECT_MESSAGE_URL =
+  "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend";
+const ACCESS_TOKEN_HEADER = "x-acs-dingtalk-access-token";
 const DEDUP_CAPACITY = 512;
 
 type MessageHandler = (event: IMMessageEvent) => void;
@@ -46,6 +48,7 @@ export interface DingTalkStreamClient {
     callback: (event: DWClientDownStream) => void,
   ): DingTalkStreamClient;
   socketCallBackResponse(messageId: string, result: unknown): void;
+  getAccessToken(): Promise<unknown>;
   connect(): Promise<void>;
   disconnect(): void;
 }
@@ -72,8 +75,9 @@ interface ReplyRoute {
 
 /**
  * DingTalk application-bot transport for the first text-only milestone.
- * It accepts direct messages through Stream Mode and replies through the
- * short-lived session webhook delivered with each inbound message.
+ * It accepts direct messages through Stream Mode. Replies prefer the
+ * short-lived session webhook delivered with each inbound message, then use
+ * DingTalk's proactive one-to-one API when that route is no longer usable.
  */
 export class DingTalkIM extends BaseIM implements RichChannelIM {
   private readonly messageHandlers = new Set<MessageHandler>();
@@ -91,6 +95,8 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   private clientId = "";
   private ownerUserId = "";
   private connectionVersion = 0;
+  private proactiveAccessToken: string | null = null;
+  private proactiveAccessTokenPromise: Promise<string> | null = null;
   private statusTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(host: IMHost, options: DingTalkIMOptions = {}) {
@@ -113,6 +119,7 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       this.host.secrets.read(OWNER_USER_ID_SECRET_KEY)?.trim() ?? "";
     if (!credentials) {
       this.clientId = "";
+      this.ownerUserId = "";
       this.setStatus({ kind: "idle" });
       return;
     }
@@ -126,6 +133,11 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     this.client?.disconnect();
     this.client = null;
     this.replyRoutes.clear();
+    this.clearProactiveAccessToken();
+    // Runtime identity belongs to the live connection. Persistent credentials
+    // remain in secure storage so reconnect can restore them explicitly.
+    this.clientId = "";
+    this.ownerUserId = "";
     this.setStatus({ kind: "idle" });
   }
 
@@ -145,15 +157,20 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   async saveConfig(
     clientId: string,
     clientSecret: string,
+    ownerUserId: string,
   ): Promise<DingTalkBotState> {
     const nextClientId = clientId.trim();
     const nextClientSecret = clientSecret.trim();
-    if (!nextClientId || !nextClientSecret)
+    const nextOwnerUserId = ownerUserId.trim();
+    if (!nextClientId || !nextClientSecret || !nextOwnerUserId)
       throw new Error("DINGTALK_CREDENTIALS_REQUIRED");
     if (!this.host.secrets.isAvailable())
       throw new Error("DINGTALK_SECURE_STORAGE_UNAVAILABLE");
 
     const previous = this.readCredentials();
+    const previousOwnerUserId = this.host.secrets.read(
+      OWNER_USER_ID_SECRET_KEY,
+    );
     if (!this.host.secrets.write(CLIENT_ID_SECRET_KEY, nextClientId)) {
       throw new Error("DINGTALK_CREDENTIAL_SAVE_FAILED");
     }
@@ -161,12 +178,18 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       this.restoreSecret(CLIENT_ID_SECRET_KEY, previous?.clientId ?? null);
       throw new Error("DINGTALK_CREDENTIAL_SAVE_FAILED");
     }
-
-    if (this.clientId && this.clientId !== nextClientId) {
-      this.host.secrets.remove(OWNER_USER_ID_SECRET_KEY);
-      this.ownerUserId = "";
+    if (!this.host.secrets.write(OWNER_USER_ID_SECRET_KEY, nextOwnerUserId)) {
+      this.restoreSecret(CLIENT_ID_SECRET_KEY, previous?.clientId ?? null);
+      this.restoreSecret(
+        CLIENT_SECRET_SECRET_KEY,
+        previous?.clientSecret ?? null,
+      );
+      this.restoreSecret(OWNER_USER_ID_SECRET_KEY, previousOwnerUserId);
+      throw new Error("DINGTALK_CREDENTIAL_SAVE_FAILED");
     }
+
     this.clientId = nextClientId;
+    this.ownerUserId = nextOwnerUserId;
     await this.connect({
       clientId: nextClientId,
       clientSecret: nextClientSecret,
@@ -177,7 +200,11 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   async reconnect(): Promise<DingTalkBotState> {
     const credentials = this.readCredentials();
     if (!credentials) throw new Error("DINGTALK_CREDENTIALS_MISSING");
+    const ownerUserId =
+      this.host.secrets.read(OWNER_USER_ID_SECRET_KEY)?.trim() ?? "";
+    if (!ownerUserId) throw new Error("DINGTALK_OWNER_USER_ID_MISSING");
     this.clientId = credentials.clientId;
+    this.ownerUserId = ownerUserId;
     await this.connect(credentials);
     return this.getState();
   }
@@ -213,22 +240,31 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   }
 
   sendText(userId: string, text: string): Promise<{ messageId: string }> {
-    return this.postReply(userId, {
-      msgtype: "text",
-      text: { content: text },
-      at: { atUserIds: [] },
-    });
+    return this.postReply(
+      userId,
+      {
+        msgtype: "text",
+        text: { content: text },
+        at: { atUserIds: [] },
+      },
+      text,
+    );
   }
 
   sendMarkdownText(
     userId: string,
     markdown: string,
   ): Promise<{ messageId: string }> {
-    return this.postReply(userId, {
-      msgtype: "markdown",
-      markdown: { title: "Cindy", text: sanitizeDingTalkMarkdown(markdown) },
-      at: { atUserIds: [] },
-    });
+    const text = sanitizeDingTalkMarkdown(markdown);
+    return this.postReply(
+      userId,
+      {
+        msgtype: "markdown",
+        markdown: { title: "Cindy", text },
+        at: { atUserIds: [] },
+      },
+      text,
+    );
   }
 
   async commitFinal(output: ImFinalOutput): Promise<void> {
@@ -266,14 +302,21 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     this.stopStatusTimer();
     this.client?.disconnect();
     this.replyRoutes.clear();
+    this.clearProactiveAccessToken();
     const client = this.clientFactory(credentials);
     this.client = client;
     this.setStatus({ kind: "connecting" });
     client.registerCallbackListener(TOPIC_ROBOT, (event) => {
       // CALLBACK topics are not auto-acked by the SDK. Acknowledge before
       // handing work to the app so DingTalk does not retry during a long turn.
-      client.socketCallBackResponse(event.headers.messageId, { status: "SUCCESS" });
-      queueMicrotask(() => this.handleDownstream(event, credentials.clientId));
+      client.socketCallBackResponse(event.headers.messageId, {
+        status: "SUCCESS",
+      });
+      queueMicrotask(() => {
+        if (version !== this.connectionVersion || this.client !== client)
+          return;
+        this.handleDownstream(event, credentials.clientId);
+      });
     });
 
     try {
@@ -316,42 +359,119 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       this.seen(payload.msgId)
     )
       return;
-    const userId = senderUserId(payload);
-    if (!this.claimOrMatchOwner(userId)) return;
+    // DingTalk's proactive one-to-one API addresses staff IDs. Requiring the
+    // configured senderStaffId here gives inbound authorization and delayed
+    // outbound delivery one stable identity instead of trusting the first DM.
+    const userId = payload.senderStaffId.trim();
+    if (!userId || userId !== this.ownerUserId) return;
     const route = replyRoute(payload, this.now());
     if (route) this.replyRoutes.set(userId, route);
     const message = toDingTalkMessageEvent(payload, fallbackContextId);
     for (const handler of this.messageHandlers) handler(message);
   }
 
-  private claimOrMatchOwner(userId: string): boolean {
-    if (this.ownerUserId) return this.ownerUserId === userId;
-    if (!this.host.secrets.isAvailable()) return false;
-    if (!this.host.secrets.write(OWNER_USER_ID_SECRET_KEY, userId))
-      return false;
-    this.ownerUserId = userId;
-    this.host.ipc.broadcast("dingtalkBot:state-change", this.getState());
-    this.log.info(`DingTalk owner claimed ...${userId.slice(-8)}`);
-    return true;
-  }
-
   private async postReply(
     userId: string,
     body: unknown,
+    proactiveText: string,
   ): Promise<{ messageId: string }> {
-    const route = this.replyRoutes.get(userId);
-    if (!route || route.expiresAt <= this.now()) {
-      this.replyRoutes.delete(userId);
-      throw new Error("DINGTALK_REPLY_ROUTE_EXPIRED");
+    if (!this.ownerUserId || userId !== this.ownerUserId) {
+      throw new Error("DINGTALK_RECIPIENT_NOT_OWNER");
     }
     if (!this.host.httpPostJson)
       throw new Error("DINGTALK_JSON_TRANSPORT_UNAVAILABLE");
-    const response = await this.host.httpPostJson(route.webhook, body);
-    const apiError = dingTalkApiError(response.body);
-    if (response.status < 200 || response.status >= 300 || apiError) {
-      throw new Error(apiError || `DINGTALK_REPLY_HTTP_${response.status}`);
+
+    const route = this.replyRoutes.get(userId);
+    if (route && route.expiresAt > this.now()) {
+      // A thrown transport error is ambiguous: the webhook may have accepted
+      // the message before the connection failed. Do not fall back and risk a
+      // duplicate; only an explicit DingTalk rejection is safe to reroute.
+      const response = await this.host.httpPostJson(route.webhook, body);
+      const apiError = dingTalkApiError(response.body);
+      if (
+        response.status >= 200 &&
+        response.status < 300 &&
+        apiError === null
+      ) {
+        return { messageId: randomUUID() };
+      }
+      if (!apiError && (response.status < 400 || response.status >= 500)) {
+        throw new Error(`DINGTALK_REPLY_HTTP_${response.status}`);
+      }
+      this.replyRoutes.delete(userId);
+    } else if (route) {
+      this.replyRoutes.delete(userId);
     }
+
+    await this.postProactiveReply(userId, proactiveText);
     return { messageId: randomUUID() };
+  }
+
+  private async postProactiveReply(
+    userId: string,
+    text: string,
+  ): Promise<void> {
+    const body = {
+      robotCode: this.clientId,
+      userIds: [userId],
+      msgKey: "sampleMarkdown",
+      msgParam: JSON.stringify({ title: "Cindy", text }),
+    };
+    let token = await this.getProactiveAccessToken();
+    let response = await this.postProactiveRequest(body, token);
+    if (response.status === 401) {
+      // Tokens are intentionally cached only in memory. A 401 is the only
+      // reliable expiry signal exposed by this SDK, so refresh exactly once.
+      this.clearProactiveAccessToken();
+      token = await this.getProactiveAccessToken();
+      response = await this.postProactiveRequest(body, token);
+    }
+    assertProactiveResponse(response);
+  }
+
+  private async postProactiveRequest(
+    body: unknown,
+    token: string,
+  ): Promise<{ status: number; body: unknown }> {
+    if (!this.host.httpPostJson)
+      throw new Error("DINGTALK_JSON_TRANSPORT_UNAVAILABLE");
+    return this.host.httpPostJson(PROACTIVE_DIRECT_MESSAGE_URL, body, {
+      headers: { [ACCESS_TOKEN_HEADER]: token },
+    });
+  }
+
+  private async getProactiveAccessToken(): Promise<string> {
+    if (this.proactiveAccessToken) return this.proactiveAccessToken;
+    if (this.proactiveAccessTokenPromise)
+      return this.proactiveAccessTokenPromise;
+
+    const client = this.client;
+    const version = this.connectionVersion;
+    if (!client) throw new Error("DINGTALK_NOT_CONNECTED");
+
+    const request = Promise.resolve(client.getAccessToken())
+      .then((value) => {
+        if (version !== this.connectionVersion || this.client !== client) {
+          throw new Error("DINGTALK_CONNECTION_CHANGED");
+        }
+        if (typeof value !== "string" || !value.trim()) {
+          throw new Error("DINGTALK_ACCESS_TOKEN_INVALID");
+        }
+        this.proactiveAccessToken = value.trim();
+        return this.proactiveAccessToken;
+      })
+      .finally(() => {
+        if (this.proactiveAccessTokenPromise === request) {
+          this.proactiveAccessTokenPromise = null;
+        }
+      });
+    this.proactiveAccessTokenPromise = request;
+    return request;
+  }
+
+  private clearProactiveAccessToken(): void {
+    this.proactiveAccessToken = null;
+    this.proactiveAccessTokenPromise = null;
   }
 
   private readCredentials(): { clientId: string; clientSecret: string } | null {
@@ -463,6 +583,35 @@ function dingTalkApiError(body: unknown): string | null {
   const code = record.errcode;
   if (code === undefined || code === 0 || code === "0") return null;
   return `DINGTALK_API_${String(code)}`;
+}
+
+function assertProactiveResponse(response: {
+  status: number;
+  body: unknown;
+}): void {
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`DINGTALK_PROACTIVE_HTTP_${response.status}`);
+  }
+  if (
+    !response.body ||
+    typeof response.body !== "object" ||
+    Array.isArray(response.body)
+  ) {
+    return;
+  }
+  const record = response.body as Record<string, unknown>;
+  if (
+    Array.isArray(record.invalidStaffIdList) &&
+    record.invalidStaffIdList.length > 0
+  ) {
+    throw new Error("DINGTALK_PROACTIVE_INVALID_STAFF_ID");
+  }
+  if (
+    Array.isArray(record.flowControlledStaffIdList) &&
+    record.flowControlledStaffIdList.length > 0
+  ) {
+    throw new Error("DINGTALK_PROACTIVE_FLOW_CONTROLLED");
+  }
 }
 
 function dingTalkConnectFailure(error: unknown): { code: string; logMessage: string } {

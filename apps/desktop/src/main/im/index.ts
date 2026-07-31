@@ -52,16 +52,28 @@
  * the logged-in user's DbClient; a later login reconnects saved credentials.
  */
 
+import path from 'node:path';
+
 import { ipcMain, BrowserWindow, dialog, type IpcMainEvent } from 'electron';
 import { and, eq, like, ne, sql } from 'drizzle-orm';
 
 import { getDbClient } from '../localDb/client/current';
 import { sessions } from '../localDb/schema';
-import { im, feishuIm, dingtalkIm, discordIm, wechatCompatibilityPolicy, wechatIm } from './host';
+import {
+  im,
+  feishuIm,
+  dingtalkIm,
+  discordIm,
+  telegramIm,
+  wechatCompatibilityPolicy,
+  wechatIm,
+} from './host';
 import { wireFeishuOrchestrator, type FeishuOrchestratorConfig } from './feishu';
 import { wireDingTalkOrchestrator } from './dingtalk';
 import { wireDiscordOrchestrator } from './discord';
+import { wireTelegramOrchestrator } from './telegram';
 import { wireWechatOrchestrator } from './wechat';
+import { resetTelegramGroupContextCursors } from './telegram/groupWindow';
 import { getImOrchestrator, listImOrchestrators } from './shared/orchestrator';
 import { createSerializedConnectionLifecycle } from './connectionLifecycle';
 import {
@@ -87,7 +99,15 @@ import {
   writeWechatWorkingDir,
 } from './wechat/channelSettings';
 
-export { im, feishuIm, dingtalkIm, discordIm, wechatIm } from './host';
+export {
+  registerTelegramBotConfigIpc,
+  im,
+  feishuIm,
+  dingtalkIm,
+  discordIm,
+  telegramIm,
+  wechatIm,
+} from './host';
 
 const log = createLogger('main:im');
 
@@ -148,6 +168,14 @@ const DISCORD_CONFIG: ImOrchestratorConfig = {
   effortOverrides: IM_DEFAULT_EFFORT_OVERRIDES,
 };
 
+// 个人 Telegram bot 渠道与 Feishu/Discord 共享同一套产品默认值。
+const TELEGRAM_CONFIG: ImOrchestratorConfig = {
+  agentKind: IM_DEFAULT_SETTINGS.agentKind,
+  defaultModel: IM_DEFAULT_SETTINGS.agents[IM_DEFAULT_SETTINGS.agentKind].model,
+  defaultPermissionMode: 'auto',
+  effortOverrides: IM_DEFAULT_EFFORT_OVERRIDES,
+};
+
 const DINGTALK_CONFIG: ImOrchestratorConfig = {
   agentKind: IM_DEFAULT_SETTINGS.agentKind,
   defaultModel: IM_DEFAULT_SETTINGS.agents[IM_DEFAULT_SETTINGS.agentKind].model,
@@ -180,6 +208,7 @@ export function startImOrchestrators(): void {
   wireFeishuOrchestrator(feishuIm, FEISHU_CONFIG);
   wireDingTalkOrchestrator(dingtalkIm, DINGTALK_CONFIG);
   wireDiscordOrchestrator(discordIm, DISCORD_CONFIG);
+  wireTelegramOrchestrator(telegramIm, TELEGRAM_CONFIG);
   wireWechatOrchestrator(wechatIm, WECHAT_CONFIG);
 
   ipcMain.handle('dingtalkBot:get-state', (event) => {
@@ -191,12 +220,13 @@ export function startImOrchestrators(): void {
     const input = requireObject(payload);
     const clientId = requireString(input.clientId, 'clientId').trim();
     const clientSecret = requireString(input.clientSecret, 'clientSecret').trim();
-    if (clientId.length > 256 || clientSecret.length > 512) {
+    const ownerUserId = requireString(input.ownerUserId, 'ownerUserId').trim();
+    if (clientId.length > 256 || clientSecret.length > 512 || ownerUserId.length > 256) {
       throwIpcError('INVALID_PARAMS', 'DingTalk credentials are too long');
     }
     try {
       return await connectionLifecycle.runWhileStarted(() =>
-        dingtalkIm.saveConfig(clientId, clientSecret),
+        dingtalkIm.saveConfig(clientId, clientSecret, ownerUserId),
       );
     } catch (error) {
       log.warn('DingTalk credential save or connection failed', {
@@ -398,6 +428,8 @@ export function startImOrchestrators(): void {
 
 async function initializeImConnection(): Promise<void> {
   await reconcileOwnerScopedImWorkingDirs();
+  // 个人 Telegram 群窗口不做自动清理(Chris 2026-07-30: 本地群消息库即 bot
+  // 的长期记忆, 永久保留, 清理只按用户明确指令执行)。
   try {
     await bindingStore.preload();
   } catch (err) {
@@ -440,6 +472,7 @@ async function reconcileOwnerScopedImWorkingDirs(): Promise<void> {
   const db = getDbClient().drizzle;
   const feishuAdapter = getImOrchestrator('feishu')?.adapter;
   const discordAdapter = getImOrchestrator('discord')?.adapter;
+  const telegramAdapter = getImOrchestrator('telegram')?.adapter;
   const wechatAdapter = getImOrchestrator('wechat')?.adapter;
 
   try {
@@ -472,6 +505,37 @@ async function reconcileOwnerScopedImWorkingDirs(): Promise<void> {
       for (const row of rows) {
         if (!row.botContextId) continue;
         const scoped = discordAdapter.sessions.ensureWorkingDir(row.botContextId);
+        if (row.workingDir === scoped) continue;
+        await db.update(sessions).set({ workingDir: scoped }).where(eq(sessions.id, row.id));
+      }
+    }
+
+    if (telegramAdapter) {
+      // source='telegram' 同时覆盖官方 hook 会话(imBotContextId 为 null)与
+      // 个人 bot 会话 — botContextId 空值守卫天然把官方行排除在外。
+      const rows = await db
+        .select({
+          id: sessions.id,
+          workingDir: sessions.workingDir,
+          botContextId: sessions.imBotContextId,
+        })
+        .from(sessions)
+        .where(eq(sessions.source, 'telegram'));
+      for (const row of rows) {
+        if (!row.botContextId) continue;
+        // /project 切到项目目录是用户显式选择, 重连不得覆盖回托管目录 —
+        // 本归一只服务"跨 owner 命名空间迁移的旧托管路径"。判定用完整尾段
+        // `…/im-working-dir/telegram-<botId>`(而非子串), 用户项目路径碰巧
+        // 含 'im-working-dir' 字样不会被误判(review P1)。
+        const managedTail = path.join('im-working-dir', `telegram-${row.botContextId}`);
+        if (
+          row.workingDir &&
+          !row.workingDir.endsWith(`${path.sep}${managedTail}`) &&
+          !row.workingDir.endsWith(`/${managedTail}`)
+        ) {
+          continue;
+        }
+        const scoped = telegramAdapter.sessions.ensureWorkingDir(row.botContextId);
         if (row.workingDir === scoped) continue;
         await db.update(sessions).set({ workingDir: scoped }).where(eq(sessions.id, row.id));
       }
@@ -517,6 +581,9 @@ const connectionLifecycle = createSerializedConnectionLifecycle({
         }
       }
       bindingStore.resetRuntime();
+      // 群上下文游标是账号内存态 — 登出/换号必须清零, 防止新账号复用旧游标
+      // 造成上下文窗口被静默跳过。
+      resetTelegramGroupContextCursors();
     }
   },
   onStartError: (err) => {
