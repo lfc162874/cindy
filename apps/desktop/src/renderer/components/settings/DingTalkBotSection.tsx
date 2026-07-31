@@ -96,7 +96,8 @@ export function DingTalkBotSection({
               className="inline-flex h-9 items-center gap-2 rounded-full border border-[var(--border-default)] px-4 text-12 text-[var(--text-primary)] disabled:opacity-50"
             >
               {bot.busy === 'reconnect' ? (
-                <Loader2 size={14} className="animate-spin" />
+                // Spinner rotation on HTML wrapper per DESIGN.md §14.4; SVG stays static.
+                <span className="inline-flex animate-spinner motion-reduce:animate-none"><Loader2 size={14} /></span>
               ) : (
                 <RefreshCw size={14} />
               )}
@@ -208,7 +209,10 @@ export function DingTalkBotSection({
                   'disabled:cursor-not-allowed disabled:opacity-40',
                 )}
               >
-                {bot.busy === 'save' && <Loader2 size={14} className="animate-spin" />}
+                {bot.busy === 'save' && (
+                  // Spinner rotation on HTML wrapper per DESIGN.md §14.4; SVG stays static.
+                  <span className="inline-flex animate-spinner motion-reduce:animate-none"><Loader2 size={14} /></span>
+                )}
                 {t('settings.dingtalkBot.connect')}
               </button>
             </div>

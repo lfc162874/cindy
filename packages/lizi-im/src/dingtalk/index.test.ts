@@ -344,6 +344,68 @@ describe("DingTalkIM", () => {
     expect(client.accessTokenCalls).toBe(0);
     await im.dispose();
   });
+  it("continues sending remaining chunks when an intermediate chunk fails", async () => {
+    // When commitFinal sends multiple chunks and one fails mid-stream,
+    // it should still attempt all subsequent chunks rather than silently
+    // truncating the reply. The first error is re-thrown after the loop.
+    let callIndex = 0;
+    const { im, client, posts } = createHarness({
+      postResponse: ({ index }) => {
+        if (index === 1) {
+          // Simulate a rate-limit or transport error on the second chunk.
+          throw new Error("DINGTALK_CHUNK_RATE_LIMITED");
+        }
+        return { status: 200, body: { errcode: 0 } };
+      },
+    });
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    client.emit(
+      directText({
+        // Provide no session webhook so all chunks go through the proactive API,
+        // making each chunk an independent HTTP call we can selectively fail.
+        sessionWebhook: "",
+        sessionWebhookExpiredTime: 0,
+      }),
+    );
+    await Promise.resolve();
+
+    // Send a text long enough to produce multiple chunks (chunk size ~4000).
+    const longText = "a".repeat(8001);
+    await expect(
+      im.commitFinal({ userId: "staff-1", text: longText }),
+    ).rejects.toThrow("DINGTALK_CHUNK_RATE_LIMITED");
+
+    // All three chunks should have been attempted despite the middle one failing.
+    expect(posts).toHaveLength(3);
+    await im.dispose();
+  });
+
+  it("broadcasts hasSecret false to all windows after clearing credentials", async () => {
+    // After clearConfig deletes persisted secrets, the final broadcast must
+    // reflect hasSecret: false. Previously dispose() set idle first, and the
+    // subsequent setStatus({ kind: "idle" }) was deduplicated, leaving
+    // other renderer windows stuck with hasSecret: true.
+    const { im, secrets, broadcasts } = createHarness();
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+
+    await im.clearConfig();
+
+    expect(im.getState()).toMatchObject({
+      status: { kind: "idle" },
+      clientId: null,
+      ownerUserId: null,
+      hasSecret: false,
+    });
+    // The last broadcast must carry hasSecret: false so every renderer
+    // window (not just the one that initiated the IPC) updates correctly.
+    const lastBroadcast = broadcasts.at(-1)?.payload as Record<string, unknown>;
+    expect(lastBroadcast).toMatchObject({
+      status: { kind: "idle" },
+      clientId: null,
+      ownerUserId: null,
+      hasSecret: false,
+    });
+  });
 });
 
 describe("DingTalk text helpers", () => {

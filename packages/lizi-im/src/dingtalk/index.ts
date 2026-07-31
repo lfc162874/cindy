@@ -216,7 +216,12 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     this.host.secrets.remove(OWNER_USER_ID_SECRET_KEY);
     this.clientId = "";
     this.ownerUserId = "";
-    this.setStatus({ kind: "idle" });
+    // After deleting persisted credentials, force-broadcast the full cleared
+    // snapshot. setStatus deduplicates identical payloads, so after dispose()
+    // already set idle the second call would be silently skipped — other
+    // renderer windows would never learn that hasSecret flipped to false.
+    this.status = { kind: "idle" };
+    this.broadcastState();
     return this.getState();
   }
 
@@ -269,9 +274,20 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
 
   async commitFinal(output: ImFinalOutput): Promise<void> {
     const chunks = chunkDingTalkMarkdown(sanitizeDingTalkMarkdown(output.text));
+    // Send every chunk independently; if an intermediate chunk fails (e.g.
+    // rate-limited or transport error), continue sending the remaining chunks
+    // so the user receives as much of the reply as possible. Collect the first
+    // error encountered and re-throw after the loop so the caller still sees
+    // the failure, but partial delivery is not silently truncated.
+    let firstError: unknown = null;
     for (const chunk of chunks) {
-      await this.sendMarkdownText(output.userId, chunk);
+      try {
+        await this.sendMarkdownText(output.userId, chunk);
+      } catch (error) {
+        if (firstError === null) firstError = error;
+      }
     }
+    if (firstError !== null) throw firstError;
   }
 
   sendFile(): Promise<SendFileResult> {
@@ -489,7 +505,14 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   private setStatus(status: IMStatus): void {
     if (JSON.stringify(this.status) === JSON.stringify(status)) return;
     this.status = status;
-    for (const handler of this.statusHandlers) handler(status);
+    this.broadcastState();
+  }
+
+  // Push the current state snapshot to all status handlers and renderer
+  // windows without deduplication. Used when callers need to guarantee that
+  // observers see a specific transition even if the status object is unchanged.
+  private broadcastState(): void {
+    for (const handler of this.statusHandlers) handler(this.status);
     this.host.ipc.broadcast("dingtalkBot:state-change", this.getState());
   }
 
