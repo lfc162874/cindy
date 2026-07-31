@@ -34,6 +34,7 @@ import {
 import { pinBlob } from '../cindy-media/ledger';
 import { t } from '../i18n';
 import { discordUiText } from './discord/uiText';
+import { createHttpPostJson } from './httpPostJson';
 import { telegramUiText } from './telegram/uiText';
 import {
   patchTelegramBehavior,
@@ -62,6 +63,8 @@ function resolveManagedImageAbsPath(url: string): string {
     ? resolveCindyMediaUrl(url).absPath
     : resolveXdtImageUrl(url).absPath;
 }
+
+const httpPostJson = createHttpPostJson((url, init) => net.fetch(url, init));
 
 const host: IMHost = {
   accountScope: imHostAccountScope,
@@ -142,22 +145,7 @@ const host: IMHost = {
       return { status: res.status, body: { error: text || `HTTP ${res.status}` } };
     }
   },
-  async httpPostJson(url, body, options) {
-    const res = await net.fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        ...options?.headers,
-      },
-      body: JSON.stringify(body),
-    });
-    const text = await res.text();
-    try {
-      return { status: res.status, body: JSON.parse(text) as unknown };
-    } catch {
-      return { status: res.status, body: { error: text || `HTTP ${res.status}` } };
-    }
-  },
+  httpPostJson,
   createLogger,
 };
 
