@@ -18,6 +18,7 @@
 
 import type {
   IMCardActionEvent,
+  IMDeliveryContext,
   IMMessageEvent,
   IMStatus,
   InteractiveCardSpec,
@@ -116,6 +117,8 @@ export interface ImFinalOutput {
   userId: string;
   text: string;
   terminal: 'done' | 'aborted' | 'error';
+  /** 入站时捕获的传输身份；渠道必须用它校验终态输出仍属于当前机器人。 */
+  deliveryContext?: IMDeliveryContext;
   threadTs?: string;
   errorCode?: string;
   /** Managed local media discovered in the terminal assistant output. */

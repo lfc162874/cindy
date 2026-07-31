@@ -73,6 +73,7 @@ import { wireDingTalkOrchestrator } from './dingtalk';
 import { wireDiscordOrchestrator } from './discord';
 import { wireTelegramOrchestrator } from './telegram';
 import { wireWechatOrchestrator } from './wechat';
+import { isSafeDingTalkId } from './dingtalk/credentialValidation';
 import { resetTelegramGroupContextCursors } from './telegram/groupWindow';
 import { getImOrchestrator, listImOrchestrators } from './shared/orchestrator';
 import { createSerializedConnectionLifecycle } from './connectionLifecycle';
@@ -221,8 +222,14 @@ export function startImOrchestrators(): void {
     const clientId = requireString(input.clientId, 'clientId').trim();
     const clientSecret = requireString(input.clientSecret, 'clientSecret').trim();
     const ownerUserId = requireString(input.ownerUserId, 'ownerUserId').trim();
-    if (clientId.length > 256 || clientSecret.length > 512 || ownerUserId.length > 256) {
-      throwIpcError('INVALID_PARAMS', 'DingTalk credentials are too long');
+    if (
+      clientId.length > 256 ||
+      clientSecret.length > 512 ||
+      ownerUserId.length > 256 ||
+      !isSafeDingTalkId(clientId) ||
+      !isSafeDingTalkId(ownerUserId)
+    ) {
+      throwIpcError('INVALID_PARAMS', 'Invalid DingTalk credentials');
     }
     try {
       return await connectionLifecycle.runWhileStarted(() =>

@@ -10,6 +10,7 @@ import { BaseIM } from "../BaseIM.js";
 import type { RichChannelIM, ImFinalOutput } from "../channelIM.js";
 import type {
   IMCardActionEvent,
+  DingTalkDeliveryContext,
   IMHost,
   IMMessageEvent,
   IMStatus,
@@ -103,6 +104,9 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   private status: IMStatus = { kind: "idle" };
   private clientId = "";
   private ownerUserId = "";
+  // 标识当前机器人身份配置的代次。它与网络连接代次分离：
+  // 同配置重连允许旧 turn 继续投递，Client ID / Owner 变化则让旧 turn 立即失效。
+  private botGenerationToken = randomUUID();
   private connectionVersion = 0;
   private proactiveAccessToken: string | null = null;
   private proactiveAccessTokenPromise: Promise<string> | null = null;
@@ -124,15 +128,14 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
 
   async init(): Promise<void> {
     const credentials = this.readCredentials();
-    this.ownerUserId =
+    const ownerUserId =
       this.host.secrets.read(OWNER_USER_ID_SECRET_KEY)?.trim() ?? "";
     if (!credentials) {
-      this.clientId = "";
-      this.ownerUserId = "";
+      this.setRuntimeIdentity("", "");
       this.setStatus({ kind: "idle" });
       return;
     }
-    this.clientId = credentials.clientId;
+    this.setRuntimeIdentity(credentials.clientId, ownerUserId);
     await this.connect(credentials);
   }
 
@@ -145,8 +148,7 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     this.clearProactiveAccessToken();
     // Runtime identity belongs to the live connection. Persistent credentials
     // remain in secure storage so reconnect can restore them explicitly.
-    this.clientId = "";
-    this.ownerUserId = "";
+    this.setRuntimeIdentity("", "");
     this.setStatus({ kind: "idle" });
   }
 
@@ -197,8 +199,7 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       throw new Error("DINGTALK_CREDENTIAL_SAVE_FAILED");
     }
 
-    this.clientId = nextClientId;
-    this.ownerUserId = nextOwnerUserId;
+    this.setRuntimeIdentity(nextClientId, nextOwnerUserId);
     await this.connect({
       clientId: nextClientId,
       clientSecret: nextClientSecret,
@@ -213,8 +214,10 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       this.restoreSecret(CLIENT_ID_SECRET_KEY, previous.clientId);
       this.restoreSecret(CLIENT_SECRET_SECRET_KEY, previous.clientSecret);
       this.restoreSecret(OWNER_USER_ID_SECRET_KEY, previousOwnerUserId);
-      this.clientId = previous.clientId;
-      this.ownerUserId = previousOwnerUserId?.trim() || "";
+      this.setRuntimeIdentity(
+        previous.clientId,
+        previousOwnerUserId?.trim() || "",
+      );
       try {
         await this.connect(previous);
       } catch {
@@ -234,8 +237,7 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     const ownerUserId =
       this.host.secrets.read(OWNER_USER_ID_SECRET_KEY)?.trim() ?? "";
     if (!ownerUserId) throw new Error("DINGTALK_OWNER_USER_ID_MISSING");
-    this.clientId = credentials.clientId;
-    this.ownerUserId = ownerUserId;
+    this.setRuntimeIdentity(credentials.clientId, ownerUserId);
     await this.connect(credentials);
     return this.getState();
   }
@@ -245,8 +247,7 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     this.host.secrets.remove(CLIENT_ID_SECRET_KEY);
     this.host.secrets.remove(CLIENT_SECRET_SECRET_KEY);
     this.host.secrets.remove(OWNER_USER_ID_SECRET_KEY);
-    this.clientId = "";
-    this.ownerUserId = "";
+    this.setRuntimeIdentity("", "");
     // After deleting persisted credentials, force-broadcast the full cleared
     // snapshot. setStatus deduplicates identical payloads, so after dispose()
     // already set idle the second call would be silently skipped — other
@@ -276,6 +277,18 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   }
 
   sendText(userId: string, text: string): Promise<{ messageId: string }> {
+    return this.sendTextForDelivery(
+      userId,
+      text,
+      this.currentDeliveryContext(),
+    );
+  }
+
+  private sendTextForDelivery(
+    userId: string,
+    text: string,
+    deliveryContext: DingTalkDeliveryContext,
+  ): Promise<{ messageId: string }> {
     return this.postReply(
       userId,
       {
@@ -284,12 +297,25 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
         at: { atUserIds: [] },
       },
       text,
+      deliveryContext,
     );
   }
 
   sendMarkdownText(
     userId: string,
     markdown: string,
+  ): Promise<{ messageId: string }> {
+    return this.sendMarkdownTextForDelivery(
+      userId,
+      markdown,
+      this.currentDeliveryContext(),
+    );
+  }
+
+  private sendMarkdownTextForDelivery(
+    userId: string,
+    markdown: string,
+    deliveryContext: DingTalkDeliveryContext,
   ): Promise<{ messageId: string }> {
     const text = sanitizeDingTalkMarkdown(markdown);
     return this.postReply(
@@ -300,23 +326,37 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
         at: { atUserIds: [] },
       },
       text,
+      deliveryContext,
     );
   }
 
   async commitFinal(output: ImFinalOutput): Promise<void> {
+    const deliveryContext = this.assertCurrentDelivery(
+      output.deliveryContext,
+    );
     const chunks = chunkDingTalkMarkdown(sanitizeDingTalkMarkdown(output.text));
     // 每段带序号标记发送；若某段限流/服务端错误则有限重试。
     // 重试仍失败后立即停止发送后续分块，并尝试发送一条简短提示，
     // 让用户明确知道本次回复不完整。最后统一向上层抛出首个错误。
     let firstError: unknown = null;
     for (let index = 0; index < chunks.length; index += 1) {
+      this.assertCurrentDelivery(deliveryContext);
       const numbered = `[${index + 1}/${chunks.length}]\n\n${chunks[index]}`;
       try {
-        await this.sendChunkWithRetry(output.userId, numbered);
+        await this.sendChunkWithRetry(
+          output.userId,
+          numbered,
+          deliveryContext,
+        );
       } catch (error) {
         if (firstError === null) firstError = error;
         // 本段重试后仍然失败，停止后续分块发送，尝试发送残缺提示。
-        await this.sendIncompleteNotice(output.userId, index, chunks.length);
+        await this.sendIncompleteNotice(
+          output.userId,
+          index,
+          chunks.length,
+          deliveryContext,
+        );
         break;
       }
     }
@@ -330,10 +370,16 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   private async sendChunkWithRetry(
     userId: string,
     markdown: string,
+    deliveryContext: DingTalkDeliveryContext,
   ): Promise<void> {
     for (let attempt = 0; attempt <= CHUNK_MAX_ATTEMPTS; attempt += 1) {
       try {
-        await this.sendMarkdownText(userId, markdown);
+        this.assertCurrentDelivery(deliveryContext);
+        await this.sendMarkdownTextForDelivery(
+          userId,
+          markdown,
+          deliveryContext,
+        );
         return;
       } catch (error) {
         const retryable = isRetryableChunkError(error);
@@ -342,6 +388,7 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
         await new Promise<void>((resolve) =>
           setTimeout(resolve, CHUNK_RETRY_DELAY_MS * (attempt + 1)),
         );
+        this.assertCurrentDelivery(deliveryContext);
       }
     }
   }
@@ -355,11 +402,13 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     userId: string,
     failedIndex: number,
     total: number,
+    deliveryContext: DingTalkDeliveryContext,
   ): Promise<void> {
     try {
-      await this.sendText(
+      await this.sendTextForDelivery(
         userId,
         `⚠️ 回复第 ${failedIndex + 1}/${total} 段发送失败，本次回复不完整，请重试。`,
+        deliveryContext,
       );
     } catch {
       // 提示本身发送失败时静默忽略，不能覆盖原始错误。
@@ -468,24 +517,67 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
     // outbound delivery one stable identity instead of trusting the first DM.
     const userId = payload.senderStaffId.trim();
     if (!userId || userId !== this.ownerUserId) return;
+    const deliveryContext = this.currentDeliveryContext();
     const route = replyRoute(payload, this.now());
-    if (route) this.replyRoutes.set(userId, route);
-    const message = toDingTalkMessageEvent(payload, fallbackContextId);
+    if (route) {
+      this.replyRoutes.set(deliveryRouteKey(deliveryContext, userId), route);
+    }
+    const message = {
+      ...toDingTalkMessageEvent(payload, fallbackContextId),
+      deliveryContext,
+    };
     for (const handler of this.messageHandlers) handler(message);
+  }
+
+  private setRuntimeIdentity(clientId: string, ownerUserId: string): void {
+    // 只在机器人身份真正变化时轮换，不能复用 connectionVersion；
+    // 否则普通断线重连也会误伤仍应正常回复的同机器人旧 turn。
+    if (this.clientId !== clientId || this.ownerUserId !== ownerUserId) {
+      this.botGenerationToken = randomUUID();
+    }
+    this.clientId = clientId;
+    this.ownerUserId = ownerUserId;
+  }
+
+  private currentDeliveryContext(): DingTalkDeliveryContext {
+    return {
+      channelName: "dingtalk",
+      generationToken: this.botGenerationToken,
+      clientId: this.clientId,
+      ownerUserId: this.ownerUserId,
+    };
+  }
+
+  private assertCurrentDelivery(
+    context: DingTalkDeliveryContext | undefined,
+  ): DingTalkDeliveryContext {
+    if (
+      !context ||
+      context.channelName !== "dingtalk" ||
+      context.generationToken !== this.botGenerationToken ||
+      context.clientId !== this.clientId ||
+      context.ownerUserId !== this.ownerUserId
+    ) {
+      throw new Error("DINGTALK_STALE_TURN");
+    }
+    return context;
   }
 
   private async postReply(
     userId: string,
     body: unknown,
     proactiveText: string,
+    deliveryContext: DingTalkDeliveryContext,
   ): Promise<{ messageId: string }> {
+    this.assertCurrentDelivery(deliveryContext);
     if (!this.ownerUserId || userId !== this.ownerUserId) {
       throw new Error("DINGTALK_RECIPIENT_NOT_OWNER");
     }
     if (!this.host.httpPostJson)
       throw new Error("DINGTALK_JSON_TRANSPORT_UNAVAILABLE");
 
-    const route = this.replyRoutes.get(userId);
+    const routeKey = deliveryRouteKey(deliveryContext, userId);
+    const route = this.replyRoutes.get(routeKey);
     if (route && route.expiresAt > this.now()) {
       // A thrown transport error is ambiguous: the webhook may have accepted
       // the message before the connection failed. Do not fall back and risk a
@@ -507,26 +599,32 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
       if (!apiError && (response.status < 400 || response.status >= 500)) {
         throw new Error(`DINGTALK_REPLY_HTTP_${response.status}`);
       }
-      this.replyRoutes.delete(userId);
+      this.replyRoutes.delete(routeKey);
     } else if (route) {
-      this.replyRoutes.delete(userId);
+      this.replyRoutes.delete(routeKey);
     }
 
-    await this.postProactiveReply(userId, proactiveText);
+    await this.postProactiveReply(
+      userId,
+      proactiveText,
+      deliveryContext,
+    );
     return { messageId: randomUUID() };
   }
 
   private async postProactiveReply(
     userId: string,
     text: string,
+    deliveryContext: DingTalkDeliveryContext,
   ): Promise<void> {
-    // 记录本次请求对应的身份，用于重连后判断是否仍属于同一机器人。
-    // 如果 Client ID 或 Owner 已变更，不得把旧会话结果通过新机器人发送。
-    const expectedClientId = this.clientId;
-    const expectedOwnerUserId = this.ownerUserId;
+    this.assertCurrentDelivery(deliveryContext);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        await this.postProactiveReplyOnce(userId, text);
+        await this.postProactiveReplyOnce(
+          userId,
+          text,
+          deliveryContext,
+        );
         return;
       } catch (error) {
         const connectionChanged =
@@ -534,14 +632,8 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
           error.message === "DINGTALK_CONNECTION_CHANGED";
         // 非重连错误或已经重试过一次，直接向上抛出。
         if (!connectionChanged || attempt > 0) throw error;
-        // 配置（Client ID / Owner）已变更，禁止把旧结果发到新机器人。
-        if (
-          this.clientId !== expectedClientId ||
-          this.ownerUserId !== expectedOwnerUserId ||
-          this.ownerUserId !== userId
-        ) {
-          throw new Error("DINGTALK_CONFIG_CHANGED");
-        }
+        // 重试前重新校验机器人代次；配置变化时必须 fail closed。
+        this.assertCurrentDelivery(deliveryContext);
         // 同一配置的网络重连：清除旧 token，下一轮将使用新连接获取新 token。
         this.clearProactiveAccessToken();
         if (!this.client) throw new Error("DINGTALK_NOT_CONNECTED");
@@ -552,20 +644,24 @@ export class DingTalkIM extends BaseIM implements RichChannelIM {
   private async postProactiveReplyOnce(
     userId: string,
     text: string,
+    deliveryContext: DingTalkDeliveryContext,
   ): Promise<void> {
     const body = {
-      robotCode: this.clientId,
+      robotCode: deliveryContext.clientId,
       userIds: [userId],
       msgKey: "sampleMarkdown",
       msgParam: JSON.stringify({ title: "Cindy", text }),
     };
     let token = await this.getProactiveAccessToken();
+    this.assertCurrentDelivery(deliveryContext);
     let response = await this.postProactiveRequest(body, token);
     if (response.status === 401) {
       // Tokens are intentionally cached only in memory. A 401 is the only
       // reliable expiry signal exposed by this SDK, so refresh exactly once.
       this.clearProactiveAccessToken();
+      this.assertCurrentDelivery(deliveryContext);
       token = await this.getProactiveAccessToken();
+      this.assertCurrentDelivery(deliveryContext);
       response = await this.postProactiveRequest(body, token);
     }
     assertProactiveResponse(response);
@@ -688,6 +784,13 @@ function replyRoute(
         : rawExpiry
       : now + 50 * 60_000;
   return expiresAt > now ? { webhook: url.toString(), expiresAt } : null;
+}
+
+function deliveryRouteKey(
+  context: DingTalkDeliveryContext,
+  userId: string,
+): string {
+  return `${context.generationToken}:${userId}`;
 }
 
 async function waitForConnected(

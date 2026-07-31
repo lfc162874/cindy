@@ -126,6 +126,19 @@ export interface IMUnsupportedEntry {
   label: string;
 }
 
+/**
+ * 钉钉终态投递所绑定的机器人配置代次。
+ * Token 只在机器人身份配置变化时轮换；同配置网络重连保持不变。
+ */
+export interface DingTalkDeliveryContext {
+  channelName: 'dingtalk';
+  generationToken: string;
+  clientId: string;
+  ownerUserId: string;
+}
+
+export type IMDeliveryContext = DingTalkDeliveryContext;
+
 export interface IMMessageEvent {
   channelName: string;
   /** Sender open_id (or channel-equivalent stable user id). */
@@ -138,6 +151,8 @@ export interface IMMessageEvent {
   messageId: string;
   /** Plain-text payload. */
   text: string;
+  /** 入站时捕获的传输身份，终态回复必须原样带回渠道做 fail-closed 校验。 */
+  deliveryContext?: IMDeliveryContext;
   /**
    * 群多人对话的发言人元数据(telegram 群 turn 提供; 其它渠道/DM 缺省)。
    * name 为平台显示名 — 不可信输入, 消费方注入 prompt 前必须消毒。

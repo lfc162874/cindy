@@ -62,7 +62,12 @@ import type {
   TurnPermissionPolicy,
   UserMessage,
 } from '@cindy/maker-core';
-import type { IMAttachment, InteractiveCardSpec, StreamingTextHandle } from '@cindy/im';
+import type {
+  IMAttachment,
+  IMDeliveryContext,
+  InteractiveCardSpec,
+  StreamingTextHandle,
+} from '@cindy/im';
 
 import { persistUserMessage } from '../messagePersistence';
 import { bindingStore } from '../binding';
@@ -123,6 +128,8 @@ interface TurnState {
   /** Stable identity used by the central interaction router for this turn. */
   turnId: string;
   userId: string;
+  /** 入站时捕获，随终态输出原样交还渠道做机器人代次校验。 */
+  deliveryContext?: IMDeliveryContext;
   /** thread = session 模型的会话维度键(slack thread root ts);feishu undefined。 */
   scopeKey?: string;
   initialMessageText: string;
@@ -280,6 +287,7 @@ type DefaultRouteTargetResolution =
 export interface ImRunAgentTurnArgs {
   botContextId: string;
   userId: string;
+  deliveryContext?: IMDeliveryContext;
   /** 渠道 message id of the user's incoming message — used for emoji ack. */
   userMessageId: string;
   text: string;
@@ -606,6 +614,7 @@ export function createTurnRunner(
     const turn: TurnState = {
       turnId: randomUUID(),
       userId,
+      ...(args.deliveryContext ? { deliveryContext: args.deliveryContext } : {}),
       scopeKey: target.scopeKey,
       initialMessageText: text,
       streamingHandle: null,
@@ -2140,6 +2149,7 @@ export function createTurnRunner(
             userId: turn.userId,
             text: finalText,
             terminal: turn.terminalKind,
+            ...(turn.deliveryContext ? { deliveryContext: turn.deliveryContext } : {}),
             threadTs: turn.scopeKey,
             ...(turn.mediaAbsPaths.length > 0 ? { mediaAbsPaths: turn.mediaAbsPaths } : {}),
             ...(turn.terminalErrorCode ? { errorCode: turn.terminalErrorCode } : {}),
@@ -2236,6 +2246,7 @@ export function createTurnRunner(
             userId,
             text: '✅ (本轮无文本输出)',
             terminal: turn.terminalKind,
+            ...(turn.deliveryContext ? { deliveryContext: turn.deliveryContext } : {}),
             threadTs: state.scopeKey,
             ...(turn.mediaAbsPaths.length > 0 ? { mediaAbsPaths: turn.mediaAbsPaths } : {}),
           });
@@ -2314,6 +2325,7 @@ export function createTurnRunner(
             userId,
             text: `❌ 错误：${msg}`,
             terminal: 'error',
+            ...(turn?.deliveryContext ? { deliveryContext: turn.deliveryContext } : {}),
             threadTs: state.scopeKey,
             errorCode: turn?.terminalErrorCode ?? 'agent_turn_error',
             ...(turn && turn.mediaAbsPaths.length > 0 ? { mediaAbsPaths: turn.mediaAbsPaths } : {}),

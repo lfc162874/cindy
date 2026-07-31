@@ -183,6 +183,7 @@ export function createMessageHandler(
       await turnRunner.runAgentTurn({
         botContextId: event.contextId,
         userId: event.senderId,
+        ...(event.deliveryContext ? { deliveryContext: event.deliveryContext } : {}),
         userMessageId: event.messageId,
         text: event.text,
         ...(turnPermissionPolicy ? { turnPermissionPolicy } : {}),

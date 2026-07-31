@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DWClientDownStream } from "dingtalk-stream";
 
-import type { IMHost } from "../types.js";
+import type { DingTalkDeliveryContext, IMHost } from "../types.js";
 import { chunkDingTalkMarkdown, sanitizeDingTalkMarkdown } from "./chunk.js";
 import { DingTalkIM, type DingTalkStreamClient } from "./index.js";
 
@@ -206,6 +206,26 @@ function directText(
   };
 }
 
+async function receiveDeliveryContext(
+  im: DingTalkIM,
+  client: FakeClient,
+  overrides: Record<string, unknown> = {},
+): Promise<DingTalkDeliveryContext> {
+  let deliveryContext: DingTalkDeliveryContext | undefined;
+  const off = im.onMessage((message) => {
+    if (message.deliveryContext?.channelName === "dingtalk") {
+      deliveryContext = message.deliveryContext;
+    }
+  });
+  client.emit(directText(overrides));
+  await Promise.resolve();
+  off();
+  if (!deliveryContext) {
+    throw new Error("DINGTALK_TEST_DELIVERY_CONTEXT_MISSING");
+  }
+  return deliveryContext;
+}
+
 describe("DingTalkIM", () => {
   it("stores credentials without exposing the client secret and connects", async () => {
     const { im, client, secrets } = createHarness();
@@ -247,6 +267,87 @@ describe("DingTalkIM", () => {
       contextId: "robot-code",
       text: "hello",
     });
+    await im.dispose();
+  });
+
+  it("binds an inbound message to the current DingTalk bot generation", async () => {
+    const { im, client } = createHarness();
+    const messages: unknown[] = [];
+    im.onMessage((message) => messages.push(message));
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+
+    client.emit(directText({ robotCode: "ding-client" }));
+    await Promise.resolve();
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      deliveryContext: {
+        channelName: "dingtalk",
+        clientId: "ding-client",
+        ownerUserId: "staff-1",
+        generationToken: expect.any(String),
+      },
+    });
+    await im.dispose();
+  });
+
+  it("rotates the bot generation when the configured owner changes", async () => {
+    const { im, client, posts } = createHarness();
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    const firstContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client",
+      msgId: "msg-owner-1",
+    });
+
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-2");
+    const secondContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client",
+      msgId: "msg-owner-2",
+      senderStaffId: "staff-2",
+    });
+
+    expect(secondContext.generationToken).not.toBe(
+      firstContext.generationToken,
+    );
+    await expect(
+      im.commitFinal({
+        userId: "staff-1",
+        text: "result generated for the previous owner",
+        terminal: "done",
+        deliveryContext: firstContext,
+      }),
+    ).rejects.toThrow("DINGTALK_STALE_TURN");
+    expect(posts).toHaveLength(0);
+    await im.dispose();
+  });
+
+  it("invalidates an old turn after dispose and reinitialization", async () => {
+    const { im, client, posts } = createHarness();
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    const firstContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client",
+      msgId: "msg-before-dispose",
+    });
+
+    await im.dispose();
+    await im.init();
+    const secondContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client",
+      msgId: "msg-after-init",
+    });
+
+    expect(secondContext.generationToken).not.toBe(
+      firstContext.generationToken,
+    );
+    await expect(
+      im.commitFinal({
+        userId: "staff-1",
+        text: "result generated before disposal",
+        terminal: "done",
+        deliveryContext: firstContext,
+      }),
+    ).rejects.toThrow("DINGTALK_STALE_TURN");
+    expect(posts).toHaveLength(0);
     await im.dispose();
   });
 
@@ -416,6 +517,132 @@ describe("DingTalkIM", () => {
     expect(client.accessTokenCalls).toBe(0);
     await im.dispose();
   });
+
+  it("fails closed when terminal output has no delivery context", async () => {
+    const { im, posts } = createHarness();
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+
+    await expect(
+      im.commitFinal({
+        userId: "staff-1",
+        text: "old result",
+        terminal: "done",
+      }),
+    ).rejects.toThrow("DINGTALK_STALE_TURN");
+    expect(posts).toHaveLength(0);
+    await im.dispose();
+  });
+
+  it("does not send bot A terminal output through bot B with the same owner", async () => {
+    const { im, client, posts } = createHarness();
+    await im.saveConfig("ding-client-a", "invalid-test-secret", "staff-1");
+    const deliveryContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client-a",
+      sessionWebhook: "",
+      sessionWebhookExpiredTime: 0,
+    });
+
+    await im.saveConfig("ding-client-b", "invalid-test-secret", "staff-1");
+
+    await expect(
+      im.commitFinal({
+        userId: "staff-1",
+        text: "result generated for bot A",
+        terminal: "done",
+        deliveryContext,
+      }),
+    ).rejects.toThrow("DINGTALK_STALE_TURN");
+    expect(posts).toHaveLength(0);
+    await im.dispose();
+  });
+
+  it("does not let bot B webhook replace bot A terminal route", async () => {
+    const { im, client, posts } = createHarness();
+    await im.saveConfig("ding-client-a", "invalid-test-secret", "staff-1");
+    const deliveryContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client-a",
+      msgId: "msg-a",
+      sessionWebhook:
+        "https://oapi.dingtalk.com/robot/sendBySession?session=bot-a",
+    });
+
+    await im.saveConfig("ding-client-b", "invalid-test-secret", "staff-1");
+    await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client-b",
+      msgId: "msg-b",
+      sessionWebhook:
+        "https://oapi.dingtalk.com/robot/sendBySession?session=bot-b",
+    });
+
+    await expect(
+      im.commitFinal({
+        userId: "staff-1",
+        text: "result generated for bot A",
+        terminal: "done",
+        deliveryContext,
+      }),
+    ).rejects.toThrow("DINGTALK_STALE_TURN");
+    expect(posts).toHaveLength(0);
+    await im.dispose();
+  });
+
+  it("allows an old turn after a same-bot network reconnect", async () => {
+    const { im, client, posts } = createHarness();
+    await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
+    const deliveryContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client",
+      sessionWebhook: "",
+      sessionWebhookExpiredTime: 0,
+    });
+
+    await im.reconnect();
+
+    await expect(
+      im.commitFinal({
+        userId: "staff-1",
+        text: "same bot result",
+        terminal: "done",
+        deliveryContext,
+      }),
+    ).resolves.toBeUndefined();
+    expect(posts).toHaveLength(1);
+    await im.dispose();
+  });
+
+  it("stops remaining chunks when the bot changes during delivery", async () => {
+    let im!: DingTalkIM;
+    const harness = createHarness({
+      postResponse: async ({ index }) => {
+        if (index === 0) {
+          await im.saveConfig(
+            "ding-client-b",
+            "invalid-test-secret",
+            "staff-1",
+          );
+        }
+        return { status: 200, body: { errcode: 0 } };
+      },
+    });
+    im = harness.im;
+    await im.saveConfig("ding-client-a", "invalid-test-secret", "staff-1");
+    const deliveryContext = await receiveDeliveryContext(im, harness.client, {
+      robotCode: "ding-client-a",
+      sessionWebhook: "",
+      sessionWebhookExpiredTime: 0,
+    });
+
+    await expect(
+      im.commitFinal({
+        userId: "staff-1",
+        text: "a".repeat(8001),
+        terminal: "done",
+        deliveryContext,
+      }),
+    ).rejects.toThrow("DINGTALK_STALE_TURN");
+    expect(harness.posts).toHaveLength(1);
+    await im.dispose();
+  });
+
   it("stops after a non-retryable chunk failure and sends an incomplete notice", async () => {
     // 分块发送时若中间段失败（且不属于可重试错误），应立即停止后续分块，
     // 并发送一条简短提示告知用户回复不完整。
@@ -427,18 +654,21 @@ describe("DingTalkIM", () => {
       },
     });
     await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
-    client.emit(
-      directText({
-        // 不提供 session webhook，使所有分块走主动发送 API。
-        sessionWebhook: "",
-        sessionWebhookExpiredTime: 0,
-      }),
-    );
-    await Promise.resolve();
+    const deliveryContext = await receiveDeliveryContext(im, client, {
+      // 不提供 session webhook，使所有分块走主动发送 API。
+      robotCode: "ding-client",
+      sessionWebhook: "",
+      sessionWebhookExpiredTime: 0,
+    });
 
     const longText = "a".repeat(8001);
     await expect(
-      im.commitFinal({ userId: "staff-1", text: longText, terminal: "done" }),
+      im.commitFinal({
+        userId: "staff-1",
+        text: longText,
+        terminal: "done",
+        deliveryContext,
+      }),
     ).rejects.toThrow("DINGTALK_CHUNK_RATE_LIMITED");
 
     const sentTexts = posts.map(readProactiveText);
@@ -464,14 +694,20 @@ describe("DingTalkIM", () => {
       },
     });
     await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
-    client.emit(
-      directText({ sessionWebhook: "", sessionWebhookExpiredTime: 0 }),
-    );
-    await Promise.resolve();
+    const deliveryContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client",
+      sessionWebhook: "",
+      sessionWebhookExpiredTime: 0,
+    });
 
     const longText = "a".repeat(8001);
     const sendPromise = expect(
-      im.commitFinal({ userId: "staff-1", text: longText, terminal: "done" }),
+      im.commitFinal({
+        userId: "staff-1",
+        text: longText,
+        terminal: "done",
+        deliveryContext,
+      }),
     ).rejects.toThrow("DINGTALK_PROACTIVE_HTTP_429");
 
     // 推进 fake timer 让退避 setTimeout 立即到期。
@@ -500,15 +736,17 @@ describe("DingTalkIM", () => {
           : { status: 200, body: { errcode: 0 } },
     });
     await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
-    client.emit(
-      directText({ sessionWebhook: "", sessionWebhookExpiredTime: 0 }),
-    );
-    await Promise.resolve();
+    const deliveryContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client",
+      sessionWebhook: "",
+      sessionWebhookExpiredTime: 0,
+    });
 
     const commitPromise = im.commitFinal({
       userId: "staff-1",
       text: "a".repeat(8001),
       terminal: "done",
+      deliveryContext,
     });
     await vi.advanceTimersByTimeAsync(1_000);
     await expect(commitPromise).resolves.toBeUndefined();
@@ -525,15 +763,17 @@ describe("DingTalkIM", () => {
   it("numbers every chunk without exceeding the DingTalk text budget", async () => {
     const { im, client, posts } = createHarness();
     await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
-    client.emit(
-      directText({ sessionWebhook: "", sessionWebhookExpiredTime: 0 }),
-    );
-    await Promise.resolve();
+    const deliveryContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client",
+      sessionWebhook: "",
+      sessionWebhookExpiredTime: 0,
+    });
 
     await im.commitFinal({
       userId: "staff-1",
       text: "😀".repeat(8001),
       terminal: "done",
+      deliveryContext,
     });
 
     const sentTexts = posts.map(readProactiveText);
@@ -558,16 +798,18 @@ describe("DingTalkIM", () => {
       },
     });
     await im.saveConfig("ding-client", "invalid-test-secret", "staff-1");
-    client.emit(
-      directText({ sessionWebhook: "", sessionWebhookExpiredTime: 0 }),
-    );
-    await Promise.resolve();
+    const deliveryContext = await receiveDeliveryContext(im, client, {
+      robotCode: "ding-client",
+      sessionWebhook: "",
+      sessionWebhookExpiredTime: 0,
+    });
 
     await expect(
       im.commitFinal({
         userId: "staff-1",
         text: "a".repeat(8001),
         terminal: "done",
+        deliveryContext,
       }),
     ).rejects.toBe(originalError);
     expect(posts.map(readProactiveText)).toEqual([
@@ -612,7 +854,7 @@ describe("DingTalkIM", () => {
     await im.dispose();
   });
 
-  it("refuses to retry proactive reply when config has changed", async () => {
+  it("fails closed when config changes during proactive token fetch", async () => {
     // 如果重连后 Client ID 已变更，不得用新机器人发送旧会话结果。
     const firstClient = new FakeClient();
     const nextClient = new FakeClient();
@@ -635,7 +877,7 @@ describe("DingTalkIM", () => {
     await im.saveConfig("ding-client-new", "invalid-test-secret", "staff-1");
     token.resolve("stale-token");
 
-    await expect(sendPromise).rejects.toThrow("DINGTALK_CONFIG_CHANGED");
+    await expect(sendPromise).rejects.toThrow("DINGTALK_STALE_TURN");
     await im.dispose();
   });
   it("broadcasts hasSecret false to all windows after clearing credentials", async () => {

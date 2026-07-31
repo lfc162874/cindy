@@ -24,6 +24,8 @@ export type { Logger } from './logger.js';
 export type {
   IMHost,
   IMAttachment,
+  DingTalkDeliveryContext,
+  IMDeliveryContext,
   IMUnsupportedEntry,
   IMMessageEvent,
   IMCardActionEvent,

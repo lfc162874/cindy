@@ -11,7 +11,7 @@ import type {
   Session,
   SessionSendResult,
 } from '@cindy/maker-core';
-import type { ChannelIM } from '@cindy/im';
+import type { ChannelIM, IMDeliveryContext } from '@cindy/im';
 
 const mocks = vi.hoisted(() => ({
   logger: {
@@ -366,6 +366,7 @@ function setupSessionWithId(
 interface TurnOverrides {
   userMessageId?: string;
   text?: string;
+  deliveryContext?: IMDeliveryContext;
 }
 
 async function runDefaultTurn(
@@ -387,6 +388,7 @@ async function startDefaultTurn(
     userMessageId: overrides.userMessageId ?? 'msg-user',
     text: overrides.text ?? 'PROMPT_SECRET full user message TOKEN_VALUE file body',
     attachments: [],
+    ...(overrides.deliveryContext ? { deliveryContext: overrides.deliveryContext } : {}),
     onTurnComplete,
   });
   return { onTurnComplete, turnPromise };
@@ -1265,6 +1267,41 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
         terminal: 'done',
         threadTs: undefined,
       });
+    } finally {
+      fakeAdapter.output = previousOutput;
+    }
+  });
+
+  it('carries the inbound delivery context into chunked terminal output', async () => {
+    const previousOutput = fakeAdapter.output;
+    const commitFinal = vi.fn(async () => undefined);
+    const deliveryContext: IMDeliveryContext = {
+      channelName: 'dingtalk',
+      generationToken: 'generation-a',
+      clientId: 'ding-client-a',
+      ownerUserId: 'ou_user',
+    };
+    fakeAdapter.output = {
+      kind: 'chunked-text',
+      im: mocks.feishuIm as unknown as ChannelIM,
+      commitFinal,
+    };
+    try {
+      const h = setupSession(async () => ({ accepted: true }));
+      const { turnPromise } = await startDefaultTurn(vi.fn(), { deliveryContext });
+      await turnPromise;
+
+      h.emit({ type: 'text', data: { text: 'bound result', isFinal: true } });
+      h.emit({ type: 'done', data: {} });
+      await flushMicrotasks();
+
+      expect(commitFinal).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'ou_user',
+          text: 'bound result',
+          deliveryContext,
+        }),
+      );
     } finally {
       fakeAdapter.output = previousOutput;
     }
