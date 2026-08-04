@@ -453,10 +453,9 @@ export function applyAgentIslandUserPrompt(
   // 直到新消息完成（成功或失败）。一旦进入保留轮次，原 errorUntil
   // 只控制自动展开时长，不再决定旧错误是否继续可见。
   if (retainError) {
-    // 保留旧错误时,允许新一轮的完成事件清掉它:markSessionRunning 把
-    // completionAllowedAfterTerminalError 重置为 false,这里恢复为 true,
-    // 让新轮的 done 能经 completeAgentIslandSession 正常切到 completed。
-    session.completionAllowedAfterTerminalError = true;
+    // 新 prompt 可能先于上一轮延迟的 status Done / done 到达。先拒绝完成尾事件,
+    // 等新轮 running / text / tool_use 活动到达后再开放完成。
+    session.completionAllowedAfterTerminalError = false;
   } else {
     session.phase = 'running';
   }
@@ -534,6 +533,9 @@ export function applyAgentIslandEvent(
   session.lastActivityAt = now;
 
   if (event.type === 'text') {
+    if (hasRetainedError(session)) {
+      session.completionAllowedAfterTerminalError = true;
+    }
     clearToolDetail(session);
     const isFinal = asRecord(event.data)?.isFinal === true;
     const line = applyAssistantTextLine(session, assistantText ?? '', isFinal);
@@ -551,6 +553,9 @@ export function applyAgentIslandEvent(
     if (isRunning === true) {
       markSessionRunning(state, session);
       const retainedError = hasRetainedError(session);
+      if (retainedError) {
+        session.completionAllowedAfterTerminalError = true;
+      }
       if (session.pendingInteractionIds.size === 0 && !retainedError) {
         session.phase = 'running';
         session.interactionKind = undefined;
@@ -598,6 +603,9 @@ export function applyAgentIslandEvent(
       return true;
     }
     const retainedError = hasRetainedError(session);
+    if (retainedError) {
+      session.completionAllowedAfterTerminalError = true;
+    }
     if (!retainedError) {
       session.phase = 'running';
       session.interactionKind = undefined;
@@ -1311,10 +1319,8 @@ function markSessionRunning(state: AgentIslandState, session: AgentIslandSession
   session.running = true;
   session.completedUntil = null;
   // 不清除 errorUntil：旧错误应保留直到新消息完成（成功或失败）
-  // 保留旧错误时也不重置 completionAllowedAfterTerminalError:它在
-  // applyAgentIslandUserPrompt 里被设为 true,让新轮的 done 能清掉旧错误;
-  // 这里重置为 false 会让 done 事件被 completeAgentIslandSession 的 error
-  // 早退挡住,旧错误永远无法在新轮成功时清除。
+  // 保留旧错误时也不重置 completionAllowedAfterTerminalError:新轮活动开放
+  // 完成后,后续 running 事件不应又把该许可清掉。
   const retainErrorCompletionAllowance = session.phase === 'error' && session.retainErrorUntilNextTerminal;
   if (!retainErrorCompletionAllowance) {
     session.completionAllowedAfterTerminalError = false;

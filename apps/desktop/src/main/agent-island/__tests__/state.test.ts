@@ -2152,6 +2152,26 @@ describe('Agent Island error 保留窗口(重试时旧错误在新消息完成�
     expect(buildAgentIslandDisplayState(state, originalErrorUntil + 350).sessions[0]?.phase).toBe('completed');
   });
 
+  it('新 prompt 后到达的旧轮 status Done / done 不会提前完成重试', () => {
+    const state = createAgentIslandState();
+    const meta = { sessionId: 's1', title: 'Task', agentKind: 'codex' };
+
+    applyAgentIslandUserPrompt(state, meta, 'first task', 1_000);
+    applyAgentIslandEvent(state, meta, terminalErrorEvent('boom'), 2_000);
+    applyAgentIslandUserPrompt(state, meta, 'retry task', 3_000);
+
+    applyAgentIslandEvent(state, meta, statusEvent(false, 'Done'), 3_100);
+    applyAgentIslandEvent(state, meta, doneEvent(), 3_200);
+    expect(buildAgentIslandDisplayState(state, 3_250).sessions[0]).toMatchObject({
+      phase: 'error',
+      detail: 'boom',
+    });
+
+    applyAgentIslandEvent(state, meta, statusEvent(true, 'Generating...'), 3_300);
+    applyAgentIslandEvent(state, meta, doneEvent(), 3_400);
+    expect(buildAgentIslandDisplayState(state, 3_450).sessions[0]?.phase).toBe('completed');
+  });
+
   it('旧错误在 errorUntil 过期后:新 user prompt 正常切回 running phase', () => {
     const state = createAgentIslandState();
     const meta = { sessionId: 's1', title: 'Task', agentKind: 'codex' };
