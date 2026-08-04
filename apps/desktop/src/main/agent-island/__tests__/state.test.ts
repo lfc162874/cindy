@@ -2130,6 +2130,28 @@ describe('Agent Island error 保留窗口(重试时旧错误在新消息完成�
     expect(display.sessions[0]?.phase).toBe('completed');
   });
 
+  it('保留中的旧错误跨过原 errorUntil 后仍不被 running / tool_use 覆盖', () => {
+    const state = createAgentIslandState();
+    const meta = { sessionId: 's1', title: 'Task', agentKind: 'codex' };
+
+    applyAgentIslandUserPrompt(state, meta, 'first task', 1_000);
+    applyAgentIslandEvent(state, meta, terminalErrorEvent('boom'), 2_000);
+
+    const originalErrorUntil = 2_000 + AGENT_ISLAND_ERROR_DWELL_MS;
+    applyAgentIslandUserPrompt(state, meta, 'retry task', originalErrorUntil - 100);
+
+    applyAgentIslandEvent(state, meta, statusEvent(true, 'Generating...'), originalErrorUntil + 100);
+    let display = buildAgentIslandDisplayState(state, originalErrorUntil + 150);
+    expect(display.sessions[0]).toMatchObject({ phase: 'error', detail: 'boom' });
+
+    applyAgentIslandEvent(state, meta, toolUseEvent('tool-1'), originalErrorUntil + 200);
+    display = buildAgentIslandDisplayState(state, originalErrorUntil + 250);
+    expect(display.sessions[0]).toMatchObject({ phase: 'error', detail: 'boom' });
+
+    applyAgentIslandEvent(state, meta, doneEvent(), originalErrorUntil + 300);
+    expect(buildAgentIslandDisplayState(state, originalErrorUntil + 350).sessions[0]?.phase).toBe('completed');
+  });
+
   it('旧错误在 errorUntil 过期后:新 user prompt 正常切回 running phase', () => {
     const state = createAgentIslandState();
     const meta = { sessionId: 's1', title: 'Task', agentKind: 'codex' };

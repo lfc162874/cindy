@@ -123,6 +123,7 @@ interface AgentIslandSessionState {
   running: boolean;
   completedUntil: number | null;
   errorUntil: number | null;
+  retainErrorUntilNextTerminal: boolean;
   /** Whether this terminal error belongs to a flow that deliberately emits a paired done. */
   completionAllowedAfterTerminalError: boolean;
   revealUntil: number | null;
@@ -443,10 +444,14 @@ export function applyAgentIslandUserPrompt(
   state.dismissedTerminalSessionIds.delete(meta.sessionId);
   const session = getOrCreateSession(state, meta, now);
   applyMeta(session, meta);
+  const retainError = session.phase === 'error'
+    && session.errorUntil !== null
+    && session.errorUntil > now;
+  session.retainErrorUntilNextTerminal = retainError;
   markSessionRunning(state, session);
   // 不在有未过期的旧错误时立即设置 phase = 'running'，让旧错误继续显示
-  // 直到新消息完成（成功或失败）
-  const retainError = session.errorUntil !== null && session.errorUntil > now;
+  // 直到新消息完成（成功或失败）。一旦进入保留轮次，原 errorUntil
+  // 只控制自动展开时长，不再决定旧错误是否继续可见。
   if (retainError) {
     // 保留旧错误时,允许新一轮的完成事件清掉它:markSessionRunning 把
     // completionAllowedAfterTerminalError 重置为 false,这里恢复为 true,
@@ -545,7 +550,7 @@ export function applyAgentIslandEvent(
     const status = typeof data?.status === 'string' ? data.status : null;
     if (isRunning === true) {
       markSessionRunning(state, session);
-      const retainedError = hasRetainedError(session, now);
+      const retainedError = hasRetainedError(session);
       if (session.pendingInteractionIds.size === 0 && !retainedError) {
         session.phase = 'running';
         session.interactionKind = undefined;
@@ -592,7 +597,7 @@ export function applyAgentIslandEvent(
       session.toolDetailUntil = null;
       return true;
     }
-    const retainedError = hasRetainedError(session, now);
+    const retainedError = hasRetainedError(session);
     if (!retainedError) {
       session.phase = 'running';
       session.interactionKind = undefined;
@@ -675,6 +680,7 @@ export function applyAgentIslandEvent(
     session.detailSource = session.detail ? 'status' : null;
     if (session.detail) appendActivityLine(session, 'status', session.detail);
     session.errorUntil = now + AGENT_ISLAND_ERROR_DWELL_MS;
+    session.retainErrorUntilNextTerminal = false;
     session.completionAllowedAfterTerminalError = options.allowCompletionAfterTerminalError === true;
     session.completedUntil = null;
     // 报错必须挂未读:smart suppress(用户正停在该会话)只抑制自动展开,不代表
@@ -700,6 +706,7 @@ export function applyAgentIslandInteractionRequest(
   session.pendingInteractionKinds.set(request.requestId, request.kind);
   session.pendingInteractionDetails.set(request.requestId, detailForInteraction(request, state.toolWording));
   session.running = true;
+  session.retainErrorUntilNextTerminal = false;
   session.completionAllowedAfterTerminalError = false;
   const activateRequest = request.kind !== 'permission' || session.permissionRequestId === null;
   if (request.kind === 'permission') {
@@ -976,6 +983,7 @@ export function closeAgentIslandSessionPreservingUnread(
   }
   // 进程已经没了,运行态必须落下来,否则 pill 会一直转着 working 动画。
   session.running = false;
+  session.retainErrorUntilNextTerminal = false;
   session.currentToolUseId = null;
   session.toolDetailUntil = null;
   // pending 交互随进程一起失效(service 侧同时会 deletePermissionRequestsForSession)。
@@ -1307,7 +1315,7 @@ function markSessionRunning(state: AgentIslandState, session: AgentIslandSession
   // applyAgentIslandUserPrompt 里被设为 true,让新轮的 done 能清掉旧错误;
   // 这里重置为 false 会让 done 事件被 completeAgentIslandSession 的 error
   // 早退挡住,旧错误永远无法在新轮成功时清除。
-  const retainErrorCompletionAllowance = session.phase === 'error' && session.errorUntil !== null;
+  const retainErrorCompletionAllowance = session.phase === 'error' && session.retainErrorUntilNextTerminal;
   if (!retainErrorCompletionAllowance) {
     session.completionAllowedAfterTerminalError = false;
   }
@@ -1343,6 +1351,7 @@ function completeAgentIslandSession(
   session.detailSource = null;
   appendCompletionPlaceholderIfNeeded(session, state.strings);
   session.errorUntil = null;
+  session.retainErrorUntilNextTerminal = false;
   session.completionAllowedAfterTerminalError = false;
 
   if (options.suppressAttention) {
@@ -2078,6 +2087,7 @@ function getOrCreateSession(
     running: false,
     completedUntil: null,
     errorUntil: null,
+    retainErrorUntilNextTerminal: false,
     completionAllowedAfterTerminalError: false,
     revealUntil: null,
     visibleInteractionSuppressedUntil: null,
@@ -2192,13 +2202,14 @@ function toSnapshot(session: AgentIslandSessionState): AgentIslandSessionSnapsho
  * 旧错误是否正处于"保留窗口":上一轮终态报错在新一轮消息完成前应继续可见。
  *
  * applyAgentIslandUserPrompt 在 errorUntil 有效时不把 phase 切回 running,
+ * 并记录这个新轮次正在保留旧错误。原 errorUntil 后续只控制展开 dwell,
  * 但随后 status(isRunning:true) / tool_use 事件也会无条件写 phase = 'running',
  * 令旧错误在首个运行事件到来时就消失。本 helper 让这些运行事件识别正在保留的
  * 上一轮错误,跳过 phase 覆盖;旧错误只在新一轮成功(completeAgentIslandSession
  * 会清 errorUntil)或再次失败(重设 error)时才结束。
  */
-function hasRetainedError(session: AgentIslandSessionState, now: number): boolean {
-  return session.phase === 'error' && session.errorUntil !== null && session.errorUntil > now;
+function hasRetainedError(session: AgentIslandSessionState): boolean {
+  return session.phase === 'error' && session.retainErrorUntilNextTerminal;
 }
 
 function isCompletionTailEvent(event: AgentEvent): boolean {
