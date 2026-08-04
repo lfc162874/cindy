@@ -2986,6 +2986,33 @@ describe('AgentIslandService native publishing', () => {
     });
   });
 
+  it('does not revive a dismissed error card when a deferred completion tail drains', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    let deferCompletion = true;
+    const publish = vi.fn((state: AgentIslandDisplayState) => state.visible);
+    const playSound = vi.fn<(sound: AgentIslandSoundChoice) => boolean>(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish, playSound },
+    });
+    service.setCompletionDeferResolver(() => deferCompletion);
+    syncEnabledForTest(service, publish);
+
+    service.handleUserPrompt({ sessionId: 's1', agentKind: 'codex' }, 'run tests');
+    service.handleAgentEvent({ sessionId: 's1', agentKind: 'codex' }, terminalErrorEvent('boom'));
+    service.handleAgentEvent({ sessionId: 's1', agentKind: 'codex' }, doneEvent());
+    service.handleSessionDismissed('s1');
+
+    expect(publish.mock.calls.at(-1)?.[0].totalCount).toBe(0);
+    playSound.mockClear();
+
+    deferCompletion = false;
+    service.notifyQueueEmptied('s1');
+
+    expect(publish.mock.calls.at(-1)?.[0].totalCount).toBe(0);
+    expect(playSound).not.toHaveBeenCalled();
+  });
+
   it('does not play a completion sound or reveal card for a silenced scheduler completion', async () => {
     vi.useFakeTimers();
     try {

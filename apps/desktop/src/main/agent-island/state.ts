@@ -155,6 +155,7 @@ interface AgentIslandSessionState {
 export interface AgentIslandUserPromptRollbackToken {
   sessionId: string;
   session: AgentIslandSessionState | null;
+  dismissedTerminal: boolean;
   activeTransientSessionId: string | null;
   transientRevealQueue: string[];
 }
@@ -165,6 +166,8 @@ export interface AgentIslandUserPromptRollbackToken {
  */
 export interface AgentIslandState {
   sessions: Map<string, AgentIslandSessionState>;
+  /** 显式移除后的终态墓碑,用于吞掉同一轮迟到的 status Done / done 尾事件。 */
+  dismissedTerminalSessionIds: Set<string>;
   isMouseInMenuBarZone: boolean;
   isMouseInExpandedPanel: boolean;
   hoverDisplayId: number | null;
@@ -198,6 +201,7 @@ export interface AgentIslandState {
 export function createAgentIslandState(): AgentIslandState {
   return {
     sessions: new Map(),
+    dismissedTerminalSessionIds: new Set(),
     isMouseInMenuBarZone: false,
     isMouseInExpandedPanel: false,
     hoverDisplayId: null,
@@ -231,6 +235,7 @@ export function createAgentIslandState(): AgentIslandState {
 export function resetAgentIslandState(state: AgentIslandState): void {
   const fresh = createAgentIslandState();
   state.sessions = fresh.sessions;
+  state.dismissedTerminalSessionIds = fresh.dismissedTerminalSessionIds;
   state.isMouseInMenuBarZone = fresh.isMouseInMenuBarZone;
   state.isMouseInExpandedPanel = fresh.isMouseInExpandedPanel;
   state.hoverDisplayId = fresh.hoverDisplayId;
@@ -434,6 +439,8 @@ export function applyAgentIslandUserPrompt(
 ): boolean {
   const text = normalizeActivityText(prompt);
   if (!text) return false;
+  // 新 user prompt 是明确的新轮边界:此前显式移除留下的终态墓碑到这里才失效。
+  state.dismissedTerminalSessionIds.delete(meta.sessionId);
   const session = getOrCreateSession(state, meta, now);
   applyMeta(session, meta);
   markSessionRunning(state, session);
@@ -474,6 +481,7 @@ export function createAgentIslandUserPromptRollbackToken(
   return {
     sessionId,
     session: session ? cloneSession(session) : null,
+    dismissedTerminal: state.dismissedTerminalSessionIds.has(sessionId),
     activeTransientSessionId: state.activeTransientSessionId,
     transientRevealQueue: [...state.transientRevealQueue],
   };
@@ -488,6 +496,11 @@ export function rollbackAgentIslandUserPrompt(
   } else {
     state.sessions.delete(token.sessionId);
   }
+  if (token.dismissedTerminal) {
+    state.dismissedTerminalSessionIds.add(token.sessionId);
+  } else {
+    state.dismissedTerminalSessionIds.delete(token.sessionId);
+  }
   state.activeTransientSessionId = token.activeTransientSessionId;
   state.transientRevealQueue = [...token.transientRevealQueue];
 }
@@ -500,6 +513,11 @@ export function applyAgentIslandEvent(
   options: ApplyAgentIslandEventOptions = {},
 ): boolean {
   if (!isIslandRelevantEvent(event)) return false;
+  if (state.dismissedTerminalSessionIds.has(meta.sessionId)) {
+    if (isCompletionTailEvent(event)) return false;
+    // 非终态尾事件代表后续真实活动,允许它重新创建灵动岛条目。
+    state.dismissedTerminalSessionIds.delete(meta.sessionId);
+  }
   const assistantText = event.type === 'text' ? assistantTextFromEvent(event) : null;
   if (event.type === 'text' && !assistantText) return false;
 
@@ -527,11 +545,12 @@ export function applyAgentIslandEvent(
     const status = typeof data?.status === 'string' ? data.status : null;
     if (isRunning === true) {
       markSessionRunning(state, session);
-      if (session.pendingInteractionIds.size === 0 && !hasRetainedError(session, now)) {
+      const retainedError = hasRetainedError(session, now);
+      if (session.pendingInteractionIds.size === 0 && !retainedError) {
         session.phase = 'running';
         session.interactionKind = undefined;
       }
-      if (status && !session.currentToolUseId && !session.toolDetailUntil) {
+      if (status && !retainedError && !session.currentToolUseId && !session.toolDetailUntil) {
         session.detail = status;
         session.detailSource = 'status';
       }
@@ -573,13 +592,14 @@ export function applyAgentIslandEvent(
       session.toolDetailUntil = null;
       return true;
     }
-    if (!hasRetainedError(session, now)) {
+    const retainedError = hasRetainedError(session, now);
+    if (!retainedError) {
       session.phase = 'running';
       session.interactionKind = undefined;
     }
     session.currentToolUseId = toolUseId;
     session.toolDetailUntil = null;
-    if (toolDescription || toolName) {
+    if (!retainedError && (toolDescription || toolName)) {
       session.detail = toolDescription || toolName || '';
       session.detailSource = 'tool';
     }
@@ -885,6 +905,7 @@ export function hasAgentIslandSessionAttention(
 
 export function removeAgentIslandSession(state: AgentIslandState, sessionId: string): void {
   state.sessions.delete(sessionId);
+  state.dismissedTerminalSessionIds.delete(sessionId);
   if (state.visibleSessionIds.delete(sessionId) && state.visibleSessionId === sessionId) {
     state.visibleSessionId = state.visibleSessionIds.values().next().value ?? null;
   }
@@ -924,6 +945,7 @@ export function dismissAgentIslandSession(
   session.completedUntil = null;
   session.errorUntil = null;
   removeAgentIslandSession(state, sessionId);
+  state.dismissedTerminalSessionIds.add(sessionId);
   return 'cleared';
 }
 
@@ -2177,6 +2199,13 @@ function toSnapshot(session: AgentIslandSessionState): AgentIslandSessionSnapsho
  */
 function hasRetainedError(session: AgentIslandSessionState, now: number): boolean {
   return session.phase === 'error' && session.errorUntil !== null && session.errorUntil > now;
+}
+
+function isCompletionTailEvent(event: AgentEvent): boolean {
+  if (event.type === 'done') return true;
+  if (event.type !== 'status') return false;
+  const data = asRecord(event.data);
+  return data?.isRunning === false && data.status === 'Done';
 }
 
 function isAttentionSession(session: AgentIslandSessionState): boolean {

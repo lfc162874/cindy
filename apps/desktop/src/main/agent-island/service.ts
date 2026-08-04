@@ -1099,6 +1099,7 @@ export class AgentIslandService {
   handleSessionDismissed(sessionId: string): void {
     const result = dismissAgentIslandSession(this.state, sessionId, Date.now());
     if (result === 'not-found') return;
+    this.deferredCompletions.delete(sessionId);
     if (this.sessionHadAttentionAtRunStart.has(sessionId)) {
       this.sessionHadAttentionAtRunStart.set(sessionId, false);
     }

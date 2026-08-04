@@ -2116,11 +2116,13 @@ describe('Agent Island error 保留窗口(重试时旧错误在新消息完成�
     applyAgentIslandEvent(state, meta, statusEvent(true, 'Generating...'), 3_100);
     display = buildAgentIslandDisplayState(state, 3_150);
     expect(display.sessions[0]?.phase).toBe('error');
+    expect(display.sessions[0]?.detail).toBe('boom');
 
     // 后续 tool_use 事件也不应覆盖保留的 error phase
     applyAgentIslandEvent(state, meta, toolUseEvent('tool-1'), 3_200);
     display = buildAgentIslandDisplayState(state, 3_250);
     expect(display.sessions[0]?.phase).toBe('error');
+    expect(display.sessions[0]?.detail).toBe('boom');
 
     // 新一轮成功完成:done 事件清掉 errorUntil 并切回 completed
     applyAgentIslandEvent(state, meta, doneEvent(), 4_000);
@@ -2191,6 +2193,25 @@ describe('Agent Island error 保留窗口(重试时旧错误在新消息完成�
   it('dismiss 不存在的会话返回 not-found', () => {
     const state = createAgentIslandState();
     expect(dismissAgentIslandSession(state, 'nonexistent', 1_000)).toBe('not-found');
+  });
+
+  it('dismiss 后忽略同一轮的 status Done / done 尾事件,直到新 user prompt 才恢复展示', () => {
+    const state = createAgentIslandState();
+    const meta = { sessionId: 's1', title: 'Task', agentKind: 'codex' };
+
+    applyAgentIslandUserPrompt(state, meta, 'first task', 1_000);
+    applyAgentIslandEvent(state, meta, terminalErrorEvent('boom'), 2_000);
+    expect(dismissAgentIslandSession(state, 's1', 2_100)).toBe('cleared');
+
+    applyAgentIslandEvent(state, meta, statusEvent(false, 'Done'), 2_200);
+    applyAgentIslandEvent(state, meta, doneEvent(), 2_300);
+    expect(buildAgentIslandDisplayState(state, 2_350).totalCount).toBe(0);
+
+    applyAgentIslandUserPrompt(state, meta, 'next task', 3_000);
+    expect(buildAgentIslandDisplayState(state, 3_050).sessions[0]).toMatchObject({
+      sessionId: 's1',
+      phase: 'running',
+    });
   });
 });
 
