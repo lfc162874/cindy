@@ -167,7 +167,7 @@ export interface AgentIslandUserPromptRollbackToken {
  */
 export interface AgentIslandState {
   sessions: Map<string, AgentIslandSessionState>;
-  /** 显式移除后的终态墓碑,用于吞掉同一轮迟到的 status Done / done 尾事件。 */
+  /** 显式移除后的终态墓碑,用于吞掉新 user prompt 前的当前轮事件。 */
   dismissedTerminalSessionIds: Set<string>;
   isMouseInMenuBarZone: boolean;
   isMouseInExpandedPanel: boolean;
@@ -517,11 +517,7 @@ export function applyAgentIslandEvent(
   options: ApplyAgentIslandEventOptions = {},
 ): boolean {
   if (!isIslandRelevantEvent(event)) return false;
-  if (state.dismissedTerminalSessionIds.has(meta.sessionId)) {
-    if (isCompletionTailEvent(event)) return false;
-    // 非终态尾事件代表后续真实活动,允许它重新创建灵动岛条目。
-    state.dismissedTerminalSessionIds.delete(meta.sessionId);
-  }
+  if (state.dismissedTerminalSessionIds.has(meta.sessionId)) return false;
   const assistantText = event.type === 'text' ? assistantTextFromEvent(event) : null;
   if (event.type === 'text' && !assistantText) return false;
 
@@ -986,6 +982,7 @@ export function closeAgentIslandSessionPreservingUnread(
 ): void {
   const session = state.sessions.get(sessionId);
   if (!session) {
+    if (state.dismissedTerminalSessionIds.has(sessionId)) return;
     removeAgentIslandSession(state, sessionId);
     return;
   }
@@ -2216,13 +2213,6 @@ function toSnapshot(session: AgentIslandSessionState): AgentIslandSessionSnapsho
  */
 function hasRetainedError(session: AgentIslandSessionState): boolean {
   return session.phase === 'error' && session.retainErrorUntilNextTerminal;
-}
-
-function isCompletionTailEvent(event: AgentEvent): boolean {
-  if (event.type === 'done') return true;
-  if (event.type !== 'status') return false;
-  const data = asRecord(event.data);
-  return data?.isRunning === false && data.status === 'Done';
 }
 
 function isAttentionSession(session: AgentIslandSessionState): boolean {
