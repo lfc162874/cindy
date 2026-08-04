@@ -439,7 +439,8 @@ export function applyAgentIslandUserPrompt(
   markSessionRunning(state, session);
   // 不在有未过期的旧错误时立即设置 phase = 'running'，让旧错误继续显示
   // 直到新消息完成（成功或失败）
-  if (session.errorUntil && session.errorUntil > now) {
+  const retainError = session.errorUntil !== null && session.errorUntil > now;
+  if (retainError) {
     // 保留旧错误时,允许新一轮的完成事件清掉它:markSessionRunning 把
     // completionAllowedAfterTerminalError 重置为 false,这里恢复为 true,
     // 让新轮的 done 能经 completeAgentIslandSession 正常切到 completed。
@@ -448,8 +449,12 @@ export function applyAgentIslandUserPrompt(
     session.phase = 'running';
   }
   session.interactionKind = undefined;
-  session.detail = '';
-  session.detailSource = null;
+  // 保留旧错误时不清 detail/detailSource:旧错误卡片需要继续展示错误文案,
+  // 清空会让用户看到空白错误态。
+  if (!retainError) {
+    session.detail = '';
+    session.detailSource = null;
+  }
   session.reconnectStatus = null;
   session.currentToolUseId = null;
   session.toolDetailUntil = null;

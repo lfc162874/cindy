@@ -2109,6 +2109,8 @@ describe('Agent Island error 保留窗口(重试时旧错误在新消息完成�
     display = buildAgentIslandDisplayState(state, 3_050);
     expect(display.sessions[0]).toMatchObject({ sessionId: 's1', phase: 'error' });
     expect(state.sessions.get('s1')?.running).toBe(true);
+    // 旧错误的文案也应保留(detail 不被清空)
+    expect(display.sessions[0]?.detail).toBe('boom');
 
     // 后续 status(isRunning:true) 事件也不应覆盖保留的 error phase
     applyAgentIslandEvent(state, meta, statusEvent(true, 'Generating...'), 3_100);
