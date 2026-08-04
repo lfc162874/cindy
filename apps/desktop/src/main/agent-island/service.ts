@@ -290,6 +290,7 @@ export class AgentIslandService {
       onPointerZones: (zones) => this.handleNativePointerZones(zones),
       onExpand: (displayId) => this.handleNativeExpand(displayId),
       onFocusSession: (sessionId) => this.focusSession(sessionId),
+      onDismissSession: (sessionId) => this.handleSessionAttentionCleared(sessionId, 'explicit'),
       onOpenSettings: () => this.dispatchMainWindowCommand('open-agent-island-settings', { playSelectSound: true }),
       onNewMessage: () => this.dispatchMainWindowCommand('new-maker', { playSelectSound: true }),
       onToggleSound: () => this.dispatchMainWindowCommand('toggle-agent-island-sound'),
@@ -2126,6 +2127,7 @@ function buildAgentIslandStrings(): AgentIslandStrings {
     allowOnce: t('agentIsland.native.allowOnce'),
     alwaysAllowForSession: t('agentIsland.native.alwaysAllowForSession'),
     deny: t('agentIsland.native.deny'),
+    removeFromIsland: t('agentIsland.native.removeFromIsland'),
   };
 }
 

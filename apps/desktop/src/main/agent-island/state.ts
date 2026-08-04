@@ -437,7 +437,11 @@ export function applyAgentIslandUserPrompt(
   const session = getOrCreateSession(state, meta, now);
   applyMeta(session, meta);
   markSessionRunning(state, session);
-  session.phase = 'running';
+  // 不在有未过期的旧错误时立即设置 phase = 'running'，让旧错误继续显示
+  // 直到新消息完成（成功或失败）
+  if (!(session.errorUntil && session.errorUntil > now)) {
+    session.phase = 'running';
+  }
   session.interactionKind = undefined;
   session.detail = '';
   session.detailSource = null;
@@ -1232,7 +1236,7 @@ function updateFocusVerificationLifecycle(state: AgentIslandState, now: number):
 function markSessionRunning(state: AgentIslandState, session: AgentIslandSessionState): void {
   session.running = true;
   session.completedUntil = null;
-  session.errorUntil = null;
+  // 不清除 errorUntil：旧错误应保留直到新消息完成（成功或失败）
   session.completionAllowedAfterTerminalError = false;
   session.revealUntil = null;
   if (session.pendingInteractionIds.size === 0) {
