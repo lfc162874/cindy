@@ -1435,10 +1435,14 @@ struct AgentIslandStrings: Codable, Equatable {
   let allowOnce: String
   let alwaysAllowForSession: String
   let deny: String
-  let removeFromIsland: String
+  let removeFromIsland: String?
 
   // Older main-process payloads do not contain appName; keep their idle view brand-current.
   var displayAppName: String { appName ?? "Cindy" }
+
+  // Older main-process payloads do not contain removeFromIsland; fall back so
+  // decoding a legacy strings object does not reject the entire state update.
+  var displayRemoveFromIsland: String { removeFromIsland ?? "Remove from Agent Island" }
 
   static let fallback = AgentIslandStrings(
     appName: "Cindy",
@@ -1462,7 +1466,7 @@ struct AgentIslandStrings: Codable, Equatable {
     allowOnce: "Allow once",
     alwaysAllowForSession: "Always allow",
     deny: "Deny",
-    removeFromIsland: "Remove from Agent Island"
+    removeFromIsland: "Remove from Agent Island" as String?
   )
 }
 
@@ -3527,7 +3531,8 @@ struct ExpandedSessionHeaderLine: View {
                   .clipShape(Circle())
               }
               .buttonStyle(.plain)
-              .help(strings.removeFromIsland)
+              .help(strings.displayRemoveFromIsland)
+              .accessibilityLabel(strings.displayRemoveFromIsland)
               .transition(.opacity)
             }
             SessionStatusCapsule(session: session, strings: strings)

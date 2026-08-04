@@ -70,6 +70,7 @@ import {
   buildAllSessionActivitySnapshots,
   closeAgentIslandSessionPreservingUnread,
   completeAgentIslandSessionWithoutAttention,
+  dismissAgentIslandSession,
   createAgentIslandUserPromptRollbackToken,
   createAgentIslandState,
   dismissAgentIslandActiveReveal,
@@ -290,7 +291,7 @@ export class AgentIslandService {
       onPointerZones: (zones) => this.handleNativePointerZones(zones),
       onExpand: (displayId) => this.handleNativeExpand(displayId),
       onFocusSession: (sessionId) => this.focusSession(sessionId),
-      onDismissSession: (sessionId) => this.handleSessionAttentionCleared(sessionId, 'explicit'),
+      onDismissSession: (sessionId) => this.handleSessionDismissed(sessionId),
       onOpenSettings: () => this.dispatchMainWindowCommand('open-agent-island-settings', { playSelectSound: true }),
       onNewMessage: () => this.dispatchMainWindowCommand('new-maker', { playSelectSound: true }),
       onToggleSound: () => this.dispatchMainWindowCommand('toggle-agent-island-sound'),
@@ -1085,6 +1086,25 @@ export class AgentIslandService {
       return;
     }
     this.interactionEpochBySession.set(sessionId, epoch);
+  }
+
+  /**
+   * 用户从灵动岛显式移除一条任务卡片(× 按钮)。
+   *
+   * 与 handleSessionAttentionCleared(read-ack)不同:dismiss 无论会话是否仍在运行
+   * 都直接硬删条目,能清掉"旧错误保留窗口"中正在重试的错误卡片
+   * (running=true, phase='error'),read-ack 路径因 isSessionVisible 仍为 true 而无法移除。
+   * 正在运行的会话本身不受影响,下一轮事件会重建条目。
+   */
+  handleSessionDismissed(sessionId: string): void {
+    const result = dismissAgentIslandSession(this.state, sessionId, Date.now());
+    if (result === 'not-found') return;
+    if (this.sessionHadAttentionAtRunStart.has(sessionId)) {
+      this.sessionHadAttentionAtRunStart.set(sessionId, false);
+    }
+    this.sessionActivityRelay.ensureSessionTerminalClear(sessionId);
+    this.publish();
+    log.debug(`session dismissed from island: session=${sessionId}`);
   }
 
   /**

@@ -439,7 +439,12 @@ export function applyAgentIslandUserPrompt(
   markSessionRunning(state, session);
   // 不在有未过期的旧错误时立即设置 phase = 'running'，让旧错误继续显示
   // 直到新消息完成（成功或失败）
-  if (!(session.errorUntil && session.errorUntil > now)) {
+  if (session.errorUntil && session.errorUntil > now) {
+    // 保留旧错误时,允许新一轮的完成事件清掉它:markSessionRunning 把
+    // completionAllowedAfterTerminalError 重置为 false,这里恢复为 true,
+    // 让新轮的 done 能经 completeAgentIslandSession 正常切到 completed。
+    session.completionAllowedAfterTerminalError = true;
+  } else {
     session.phase = 'running';
   }
   session.interactionKind = undefined;
@@ -517,7 +522,7 @@ export function applyAgentIslandEvent(
     const status = typeof data?.status === 'string' ? data.status : null;
     if (isRunning === true) {
       markSessionRunning(state, session);
-      if (session.pendingInteractionIds.size === 0) {
+      if (session.pendingInteractionIds.size === 0 && !hasRetainedError(session, now)) {
         session.phase = 'running';
         session.interactionKind = undefined;
       }
@@ -563,8 +568,10 @@ export function applyAgentIslandEvent(
       session.toolDetailUntil = null;
       return true;
     }
-    session.phase = 'running';
-    session.interactionKind = undefined;
+    if (!hasRetainedError(session, now)) {
+      session.phase = 'running';
+      session.interactionKind = undefined;
+    }
     session.currentToolUseId = toolUseId;
     session.toolDetailUntil = null;
     if (toolDescription || toolName) {
@@ -881,6 +888,38 @@ export function removeAgentIslandSession(state: AgentIslandState, sessionId: str
     state.pendingFocusSessionId = null;
     state.pendingFocusUntil = null;
   }
+}
+
+/**
+ * 用户显式从灵动岛移除一条任务卡片(× 按钮)。
+ *
+ * 与 acknowledgeAgentIslandSessionRead 不同:read-ack 只清未读/dwell,会话仍在运行
+ * (running=true)时 isSessionVisible 仍为 true,条目不会被删,phase 也不变 -- 对
+ * "旧错误保留窗口"中正在重试的错误卡片(running=true, phase='error')来说,read-ack
+ * 无法把它从岛上拿掉。
+ *
+ * dismiss 是"这条记录不该再占据灵动岛"的语义:无论 running / dwell / unread 状态,
+ * 直接清除 attention 状态并硬删条目。正在运行的会话本身(侧栏、agent 进程)不受影响,
+ * 只是灵动岛不再展示它;下一轮事件到来时 getOrCreateSession 会重建条目。
+ *
+ * 返回值与 acknowledgeAgentIslandSessionRead 对齐,供 service 层判断是否需要发收尾包。
+ */
+export function dismissAgentIslandSession(
+  state: AgentIslandState,
+  sessionId: string,
+  now: number,
+): 'cleared' | 'not-found' {
+  const session = state.sessions.get(sessionId);
+  if (!session) return 'not-found';
+  // 先清 attention/dwell 再硬删,保证 relay 收尾包语义与 read-ack 一致。
+  session.unread = false;
+  session.deferredReveal = false;
+  session.deferredRevealReason = null;
+  session.revealUntil = null;
+  session.completedUntil = null;
+  session.errorUntil = null;
+  removeAgentIslandSession(state, sessionId);
+  return 'cleared';
 }
 
 /**
@@ -1237,7 +1276,14 @@ function markSessionRunning(state: AgentIslandState, session: AgentIslandSession
   session.running = true;
   session.completedUntil = null;
   // 不清除 errorUntil：旧错误应保留直到新消息完成（成功或失败）
-  session.completionAllowedAfterTerminalError = false;
+  // 保留旧错误时也不重置 completionAllowedAfterTerminalError:它在
+  // applyAgentIslandUserPrompt 里被设为 true,让新轮的 done 能清掉旧错误;
+  // 这里重置为 false 会让 done 事件被 completeAgentIslandSession 的 error
+  // 早退挡住,旧错误永远无法在新轮成功时清除。
+  const retainErrorCompletionAllowance = session.phase === 'error' && session.errorUntil !== null;
+  if (!retainErrorCompletionAllowance) {
+    session.completionAllowedAfterTerminalError = false;
+  }
   session.revealUntil = null;
   if (session.pendingInteractionIds.size === 0) {
     session.interactionRevealDismissed = false;
@@ -2113,6 +2159,19 @@ function toSnapshot(session: AgentIslandSessionState): AgentIslandSessionSnapsho
     startedAt: session.startedAt,
     lastActivityAt: session.lastActivityAt,
   };
+}
+
+/**
+ * 旧错误是否正处于"保留窗口":上一轮终态报错在新一轮消息完成前应继续可见。
+ *
+ * applyAgentIslandUserPrompt 在 errorUntil 有效时不把 phase 切回 running,
+ * 但随后 status(isRunning:true) / tool_use 事件也会无条件写 phase = 'running',
+ * 令旧错误在首个运行事件到来时就消失。本 helper 让这些运行事件识别正在保留的
+ * 上一轮错误,跳过 phase 覆盖;旧错误只在新一轮成功(completeAgentIslandSession
+ * 会清 errorUntil)或再次失败(重设 error)时才结束。
+ */
+function hasRetainedError(session: AgentIslandSessionState, now: number): boolean {
+  return session.phase === 'error' && session.errorUntil !== null && session.errorUntil > now;
 }
 
 function isAttentionSession(session: AgentIslandSessionState): boolean {
