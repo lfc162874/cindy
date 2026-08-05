@@ -2152,7 +2152,7 @@ describe('Agent Island error 保留窗口(重试时旧错误在新消息完成�
     expect(buildAgentIslandDisplayState(state, originalErrorUntil + 350).sessions[0]?.phase).toBe('completed');
   });
 
-  it('新 prompt 后到达的旧轮 status Done / done 不会提前完成重试', () => {
+  it('新 prompt 后到达的旧轮 status Done / done 不会提前完成重试(running/交互态也不被破坏)', () => {
     const state = createAgentIslandState();
     const meta = { sessionId: 's1', title: 'Task', agentKind: 'codex' };
 
@@ -2160,8 +2160,17 @@ describe('Agent Island error 保留窗口(重试时旧错误在新消息完成�
     applyAgentIslandEvent(state, meta, terminalErrorEvent('boom'), 2_000);
     applyAgentIslandUserPrompt(state, meta, 'retry task', 3_000);
 
+    const sessionAfterRetry = state.sessions.get('s1');
+    expect(sessionAfterRetry?.running).toBe(true);
+
     applyAgentIslandEvent(state, meta, statusEvent(false, 'Done'), 3_100);
     applyAgentIslandEvent(state, meta, doneEvent(), 3_200);
+
+    // 旧轮尾事件应被"保留窗口"守卫直接拒绝:running / 交互态 / error phase 不变。
+    const session = state.sessions.get('s1');
+    expect(session?.running).toBe(true);
+    expect(session?.detailSource).toBe('status');
+    expect(session?.pendingInteractionIds.size).toBe(0);
     expect(buildAgentIslandDisplayState(state, 3_250).sessions[0]).toMatchObject({
       phase: 'error',
       detail: 'boom',

@@ -563,6 +563,11 @@ export function applyAgentIslandEvent(
       return true;
     }
     if (isRunning === false) {
+      const isDone = session.pendingInteractionIds.size === 0 && status === 'Done';
+      // 旧错误保留窗口内,完成许可未开放时拒绝旧轮 Done:不能让它清掉保留态。
+      if (isDone && hasRetainedError(session) && !session.completionAllowedAfterTerminalError) {
+        return true;
+      }
       session.running = false;
       session.currentToolUseId = null;
       session.toolDetailUntil = null;
@@ -570,7 +575,7 @@ export function applyAgentIslandEvent(
         session.detail = '';
         session.detailSource = null;
       }
-      if (session.pendingInteractionIds.size === 0 && status === 'Done') {
+      if (isDone) {
         completeAgentIslandSession(state, session, now, {
           suppressAttention: options.suppressCompletionAttention === true,
           preserveAttention: options.preserveCompletionAttention === true,
@@ -631,6 +636,11 @@ export function applyAgentIslandEvent(
   }
 
   if (event.type === 'done') {
+    // 旧错误保留窗口内,完成许可未开放时拒绝旧轮 done:
+    // 不能让它清掉保留的 error 态和运行标记。
+    if (hasRetainedError(session) && !session.completionAllowedAfterTerminalError) {
+      return true;
+    }
     clearAssistantStream(session);
     session.running = false;
     session.pendingInteractionIds.clear();
