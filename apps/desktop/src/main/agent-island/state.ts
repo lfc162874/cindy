@@ -4,6 +4,7 @@ import {
   type InteractionRequest,
 } from '@cindy/maker-core';
 import { DEFAULT_TOOL_ROW_WORDING, type ToolRowWording } from '@cindy/maker-shared/message-presentation';
+import { isTurnContinuationBoundaryEvent } from '@cindy/maker-shared/turn-continuation';
 
 import { stripTrailingPathSeparators } from '../../shared/pathText';
 
@@ -518,6 +519,8 @@ export function applyAgentIslandEvent(
 ): boolean {
   if (!isIslandRelevantEvent(event)) return false;
   if (state.dismissedTerminalSessionIds.has(meta.sessionId)) return false;
+  // A claimed done/status pair only seals one SDK turn. The product turn is
+  if (isTurnContinuationBoundaryEvent(event)) return false;
   const assistantText = event.type === 'text' ? assistantTextFromEvent(event) : null;
   if (event.type === 'text' && !assistantText) return false;
 

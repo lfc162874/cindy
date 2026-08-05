@@ -49,7 +49,7 @@ function pushMakerStatus(sessionId: string, data: Record<string, unknown>): void
 function pushMakerTaskUpdate(
   sessionId: string,
   taskId: string,
-  opts: { source?: 'claude-code' | 'codex'; status?: string; description?: string } = {},
+  opts: { source?: 'claude-code' | 'codex' | 'pi'; status?: string; description?: string } = {},
 ): void {
   remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
     sessionId,
@@ -1816,6 +1816,51 @@ describe('remoteSessionStore', () => {
     });
   });
 
+  it('projects terminal 429 retries as rate-limit attempts only with their reason', () => {
+    const message =
+      'exceeded retry limit, last status: 429 Too Many Requests (rate-limit-retry 1/2)';
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: {
+        type: 'error',
+        data: {
+          message,
+          reason: 'terminal-rate-limit-retry',
+          isTerminal: false,
+          willRetry: true,
+        },
+      },
+    });
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toEqual({
+      attempt: 1,
+      maxAttempts: 2,
+      kind: 'rate-limit',
+    });
+
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: {
+        type: 'error',
+        data: { message, isTerminal: false, willRetry: true },
+      },
+    });
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toBeNull();
+
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: {
+        type: 'error',
+        data: {
+          message: 'provider failed (auto-retry 1/2)',
+          reason: 'terminal-rate-limit-retry',
+          isTerminal: false,
+          willRetry: true,
+        },
+      },
+    });
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toBeNull();
+  });
+
   it('tracks session running state from maker event push boundaries', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:10.000Z'));
@@ -1936,6 +1981,11 @@ describe('remoteSessionStore', () => {
     pushMakerStatus('s1', { isRunning: true, status: 'Thinking', tokenUsage: 100 });
     expect(remoteSessionStore.getSessionTaskUpdates('s1').size).toBe(1);
     expect([...remoteSessionStore.getSessionTaskUpdates('s1').values()][0]?.taskId).toBe('task-new');
+  });
+
+  it('preserves Pi as the source of agent task updates', () => {
+    pushMakerTaskUpdate('s1', 'pi-task', { source: 'pi' });
+    expect([...remoteSessionStore.getSessionTaskUpdates('s1').values()][0]?.provider).toBe('pi');
   });
 
   it('sweeps everything on a side-task start too, recalling the worker on its next update', () => {
@@ -2087,6 +2137,44 @@ describe('remoteSessionStore', () => {
       event: { type: 'done', data: {} },
     });
     expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(false);
+  });
+
+  it('keeps the product turn running across claimed mobile continuation boundaries', () => {
+    vi.useFakeTimers();
+    try {
+      pushMakerStatus('s1', { isRunning: true });
+      pushMakerText('s1', 'persist-1', 'first segment', false);
+      vi.runOnlyPendingTimers();
+
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 's1',
+        event: {
+          type: 'status',
+          turnContinuationId: 7,
+          data: { isRunning: false, status: 'Done' },
+        },
+      });
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 's1',
+        event: { type: 'done', turnContinuationId: 7, data: {} },
+      });
+
+      expect(remoteSessionStore.isSessionRunning('s1')).toBe(true);
+      expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(true);
+      expect(remoteSessionStore.getSessionRunStatus('s1').startedAt).not.toBeNull();
+      expect(remoteSessionStore.getMessages('s1')[0]?.agentMeta?.isStreaming).toBe(true);
+
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 's1',
+        event: { type: 'done', data: {} },
+      });
+
+      expect(remoteSessionStore.isSessionRunning('s1')).toBe(false);
+      expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(false);
+      expect(remoteSessionStore.getMessages('s1')[0]?.agentMeta?.isStreaming).not.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('preserves boundary agent metadata when finalizing a streaming row', () => {

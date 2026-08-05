@@ -25,6 +25,9 @@ import {
 import {
   getDeviceLinkStatus,
   getDeviceLinkConnectionIssue,
+  isDeviceLinkStandby,
+  getUnresponsiveDeviceIds,
+  clearDeviceResponsiveness,
   setRemoteControlEnabled,
   setKeepAwakeEnabled,
   openRemoteLink,
@@ -97,6 +100,8 @@ export interface DeviceLinkIpcDeps {
   revoke(deviceId: string): Promise<void>;
   restore(deviceId: string): Promise<void>;
   setDeviceControlEnabled(deviceId: string, enabled: boolean): Promise<string[]>;
+  /** 清理本机禁用目标的响应性熔断状态。 */
+  clearDeviceResponsiveness?(deviceId: string): void;
   broadcast(channel: string, payload: unknown): void;
   readLastKnownDeviceNames(): Record<string, string>;
   rememberLastKnownDeviceName(deviceId: string, name: string): Promise<boolean>;
@@ -118,9 +123,11 @@ export function defaultDeps(): DeviceLinkIpcDeps {
         keepAwake: s.keepAwake,
         linkStatus: getDeviceLinkStatus(),
         connectionIssue: getDeviceLinkConnectionIssue(),
+        standby: isDeviceLinkStandby(),
         controlledBy: getActiveControllers(),
         revokedControllers: s.revokedControllers,
         disabledControlDeviceIds: s.disabledControlDeviceIds,
+        unresponsiveDeviceIds: getUnresponsiveDeviceIds(),
       };
     },
     setEnabled: setRemoteControlEnabled,
@@ -138,6 +145,7 @@ export function defaultDeps(): DeviceLinkIpcDeps {
     revoke: revokeController,
     restore: restoreController,
     setDeviceControlEnabled,
+    clearDeviceResponsiveness,
     broadcast,
     readLastKnownDeviceNames,
     rememberLastKnownDeviceName,
@@ -153,6 +161,7 @@ const DEVICE_LINK_CODE_MAP: Record<string, IpcErrorCode> = {
   CHANNEL_NOT_ALLOWED: 'DEVICE_LINK_CHANNEL_NOT_ALLOWED',
   ACCESS_REVOKED: 'DEVICE_LINK_ACCESS_REVOKED',
   INVOKE_TIMEOUT: 'DEVICE_LINK_TIMEOUT',
+  DEVICE_UNRESPONSIVE: 'DEVICE_LINK_DEVICE_UNRESPONSIVE',
   VERSION_MISMATCH: 'DEVICE_LINK_VERSION_MISMATCH',
   NOT_CONNECTED: 'DEVICE_LINK_NOT_CONNECTED',
   LINK_NOT_OPEN: 'DEVICE_LINK_NOT_CONNECTED',
@@ -222,9 +231,12 @@ export function handleGetState(deps: DeviceLinkIpcDeps): DeviceLinkState {
     keepAwake: state.keepAwake,
     linkStatus: 'stopped',
     connectionIssue: null,
+    // 无 device-link 能力(未登录 / 本地会话)不是“被本机另一实例占用”,按 false 上报。
+    standby: false,
     controlledBy: [],
     revokedControllers: [],
     disabledControlDeviceIds: [],
+    unresponsiveDeviceIds: [],
   };
 }
 
@@ -265,6 +277,7 @@ export async function handleSetDeviceControlEnabled(
   const disabledControlDeviceIds = await deps.setDeviceControlEnabled(normalizedDeviceId, enabled);
   if (!enabled) {
     resetSubscriptionRefcountForDevice(normalizedDeviceId);
+    deps.clearDeviceResponsiveness?.(normalizedDeviceId);
     deps.closeLink(normalizedDeviceId);
   }
   deps.broadcast(DEVICE_LINK_PUSH.CONTROL_TARGET_CHANGED, {
@@ -392,7 +405,15 @@ export function handleCloseLink(deps: DeviceLinkIpcDeps, deviceId: unknown): { o
   if (typeof deviceId !== 'string' || !deviceId.trim()) {
     throwIpcError('INVALID_PARAMS', 'deviceId is required');
   }
-  deps.closeLink(deviceId);
+  const normalizedDeviceId = deviceId.trim();
+  // 显式断开 = 撤回对该设备的控制需求。订阅引用表是全部重放入口(ws-online /
+  // presence 翻转 / 熔断恢复)共用的需求信号:不清的话,close 后任一恢复事件都会
+  // 带着幽灵引用经按需建链把刚关的链路建回来;被控端在 link 关闭时本就丢弃订阅,
+  // 这里让控制端账本与之对齐。清引用 + 清熔断 + 关链路,与「禁用设备控制」路径
+  // (setDeviceControlEnabled(false))的既有三连一致(review P2)。
+  resetSubscriptionRefcountForDevice(normalizedDeviceId);
+  deps.clearDeviceResponsiveness?.(normalizedDeviceId);
+  deps.closeLink(normalizedDeviceId);
   return { ok: true };
 }
 

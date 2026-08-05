@@ -25,7 +25,7 @@ import { getMaker, restartCodexAfterAuthModeChange } from '../maker-host/index.j
 import { shutdownCodexEnvironment } from '../mcp-integrations/codexEnvironment.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
 import { getModelVisibilityOverride } from '../maker-host/model-visibility-mirror.js';
-import { WorktreeManager } from '../worktree/index.js';
+import { resolveFreshSourceBranch, WorktreeManager } from '../worktree/index.js';
 import { prepareHandoffWorktree } from '../maker-ipc/handoffWorktree.js';
 import {
   onUiContinuation,
@@ -348,8 +348,10 @@ function ensureInstances(): { store: SlackHookStore; manager: HookControlManager
               detectCwd: WorktreeManager.detectCwd,
               suggestName: WorktreeManager.suggestName,
               listBranches: WorktreeManager.listBranches,
+              resolveCommit: WorktreeManager.revParseCommit,
               createWorktree: WorktreeManager.createWorktree,
               createId: () => randomUUID(),
+              resolveFreshSource: resolveFreshSourceBranch,
             },
             undefined, // hook 派发没有 dispatcher session, 直接从 workingDir 解析 base repo
             workingDir,
@@ -425,7 +427,9 @@ function ensureInstances(): { store: SlackHookStore; manager: HookControlManager
         deviceId: authManager.getDeviceId(),
         deviceName: os.hostname(),
       }),
-      agents: ['claude-code', 'codex'],
+      // Only advertise runtimes that are actually registered on this build.
+      // Pi is optional on unsupported/unprepared platforms.
+      agents: getMaker().listAvailableAgents(),
       notifyStatus: broadcastStatus,
       onSlackToolProviderEnabledChanged: requestCodexMcpRefreshForSlackAvailability,
       notifyPrefs: broadcastPrefs,
@@ -442,10 +446,10 @@ function ensureInstances(): { store: SlackHookStore; manager: HookControlManager
       // permissionModes 仍取 capabilities(运行时能力, 与供应商无关), server
       // 侧据此渲染权限档下拉(选中值经 dispatch options.permissionMode 回流)
       listAgentModels: async () => {
-        const providers = await getDesktopProviderService().listProviders({
-          allowSideEffects: true,
-        });
-        return (['claude-code', 'codex'] as const).map((agentKind) => {
+        const providers = await getDesktopProviderService().listProviders({ allowSideEffects: true });
+        // 动态取 runtime 已注册的 agent(含 Pi,若已安装);上游此处硬编码 cc/codex(早于 Pi),
+        // 本 PR 的 Pi 接入以 listAvailableAgents() 为准 —— 与新建入口按注册结果门控同源。
+        return getMaker().listAvailableAgents().map((agentKind) => {
           const models = visibleModelUnion(providers, agentKind, (providerId, m) =>
             isModelVisible(
               getModelVisibilityOverride(agentKind, providerId, m.id),
@@ -684,19 +688,23 @@ export function registerHookControlIpc(): void {
     return { hook: m.snapshot() };
   });
 
-  registerTrustedHookControlHandler(HOOK_CONTROL_INVOKE.SET_X_DEFAULT_WORKSPACE, (_e, payload) => {
-    requireHookControl();
-    const { store: s, manager: m } = ensureInstances();
-    const p = requireObject(payload);
-    // 只认显式的 null 或字符串: 这里的 null 是「清空默认目录」这个破坏性动作,
-    // 把缺字段当 null 会让 renderer 的一次调用疏忽静默清掉用户已保存的设置。
-    const alias = requireNullableString(p.alias, 'alias');
-    translateValidation(() => s.setXDefaultWorkspace(alias));
-    // 与 SET_WORKSPACES 同款: 默认目录也走 hello, 在线时重发一帧即可让 server
-    // 感知(它以最新一帧为准), 不重建连接 —— 重建会让设置页状态与偏好区闪烁。
-    if (!m.refreshHello()) m.sync();
-    return { hook: m.snapshot() };
-  });
+  registerTrustedHookControlHandler(
+    HOOK_CONTROL_INVOKE.SET_PROVIDER_DEFAULT_WORKSPACE,
+    (_e, payload) => {
+      requireHookControl();
+      const { store: s, manager: m } = ensureInstances();
+      const p = requireObject(payload);
+      const provider = requireNeutralProvider(payload);
+      // 只认显式的 null 或字符串: 这里的 null 是「清空默认目录」这个破坏性动作,
+      // 把缺字段当 null 会让 renderer 的一次调用疏忽静默清掉用户已保存的设置。
+      const alias = requireNullableString(p.alias, 'alias');
+      translateValidation(() => s.setProviderDefaultWorkspace(provider, alias));
+      // 与 SET_WORKSPACES 同款: 默认目录也走 hello, 在线时重发一帧即可让 server
+      // 感知(它以最新一帧为准), 不重建连接 —— 重建会让设置页状态与偏好区闪烁。
+      if (!m.refreshHello()) m.sync();
+      return { hook: m.snapshot() };
+    },
+  );
 
   // 发起 Slack 账号绑定(SIWS OIDC): 经已连接的 WS 发 bind.start(无参); server
   // 回 bind.update(pending, authorizeUrl), main 打开系统浏览器并广播状态。

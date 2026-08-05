@@ -21,8 +21,11 @@ vi.mock('../../localDb/client/current', () => ({
   getCurrentDbClientUserId: () => currentDbClient.userId,
 }));
 vi.mock('../modelPricing', () => ({
-  getModelPricing: vi.fn(),
+  getGatewayModelPricing: vi.fn(),
   isModelPricingRefreshInFlight: vi.fn(() => false),
+}));
+vi.mock('../referenceModelPricing', () => ({
+  getReferenceModelPricing: vi.fn(() => ({})),
   readModelPriceOverridesSnapshot: vi.fn(() => ({})),
   getClaudeSubscriptionValuePrice: (
     model: string,
@@ -106,6 +109,7 @@ import {
   computeAnomaly,
   computeStreaks,
   emptyUsageHistoryPayload,
+  piSubscriptionUsageModelKey,
   prevDayKey,
   readUsageHistory,
   readUsageHistoryWith,
@@ -114,7 +118,8 @@ import {
 } from '../usageHistory';
 import { getAllSpendDays } from '../../localDb/dailySpend';
 import { getModelUsageSince } from '../../localDb/dailyModelUsage';
-import { getModelPricing, isModelPricingRefreshInFlight } from '../modelPricing';
+import { getGatewayModelPricing, isModelPricingRefreshInFlight } from '../modelPricing';
+import { getReferenceModelPricing } from '../referenceModelPricing';
 import {
   __resetActiveLedgerCurrencyForTesting,
   setActiveLedgerCurrency,
@@ -164,7 +169,7 @@ function subscriptionQuote(
 
 function modelRow(
   day: string,
-  agentKind: 'claude-code' | 'codex',
+  agentKind: 'claude-code' | 'codex' | 'pi',
   model: string,
   money: RegionalMoney,
   tokens: {
@@ -190,7 +195,8 @@ function makeDeps(overrides: Partial<UsageHistoryDeps> = {}): UsageHistoryDeps {
   return {
     getAllSpendDays: async () => [],
     getModelUsageSince: async () => [],
-    getModelPricing: async () => null,
+    getGatewayModelPricing: async () => null,
+    getReferenceModelPricing: () => ({}),
     getModelPriceOverridesSnapshot: () => ({}),
     isModelPricingRefreshInFlight: () => false,
     todayKey: () => TODAY,
@@ -209,7 +215,8 @@ beforeEach(async () => {
   __resetActiveLedgerCurrencyForTesting();
   vi.mocked(getAllSpendDays).mockResolvedValue([]);
   vi.mocked(getModelUsageSince).mockResolvedValue([]);
-  vi.mocked(getModelPricing).mockResolvedValue(null);
+  vi.mocked(getGatewayModelPricing).mockResolvedValue(null);
+  vi.mocked(getReferenceModelPricing).mockReturnValue({});
   vi.mocked(isModelPricingRefreshInFlight).mockReturnValue(false);
 });
 
@@ -278,6 +285,9 @@ describe('billing model keys', () => {
     expect(claudeSubscriptionUsageModelKey('claude-opus-4-8')).toBe(
       'claude-opus-4-8#billing=subscription',
     );
+    expect(piSubscriptionUsageModelKey('chatgpt/gpt-5.6-sol')).toBe(
+      'chatgpt/gpt-5.6-sol#billing=subscription',
+    );
   });
 });
 
@@ -319,7 +329,7 @@ describe('readUsageHistoryWith', () => {
           { outputTokens: 100 },
         ),
       ],
-      getModelPricing: async () => ({
+      getReferenceModelPricing: () => ({
         openai: {
           'gpt-5.5': subscriptionQuote('openai', 'gpt-5.5', 2, 8),
         },
@@ -415,7 +425,7 @@ describe('readUsageHistoryWith', () => {
             { outputTokens: 20 },
           ),
         ],
-        getModelPricing: async () => ({
+        getReferenceModelPricing: () => ({
           openai: {
             'gpt-5.5': subscriptionQuote('openai', 'gpt-5.5', 2, 8),
           },
@@ -475,7 +485,7 @@ describe('readUsageHistoryWith', () => {
           { day: TODAY, monies: [usdRow(5)] },
         ],
         getModelUsageSince: async () => [],
-        getModelPricing: async () => ({
+        getGatewayModelPricing: async () => ({
           xd: {
             'gpt-5.5': {
               providerId: 'xd',
@@ -507,7 +517,7 @@ describe('readUsageHistoryWith', () => {
           { inputTokens: 1_000_000 },
         ),
       ],
-      getModelPricing: async () => ({
+      getReferenceModelPricing: () => ({
         anthropic: {
           'claude-opus-4-8': subscriptionQuote(
             'anthropic',
@@ -524,6 +534,29 @@ describe('readUsageHistoryWith', () => {
       model: 'claude-opus-4-8',
     });
     expect(result.models[0].estimatedMoney?.amount).toBe(expected);
+  });
+
+  it('keeps Pi cache usage as a distinct subscription row', async () => {
+    const result = await readUsageHistoryWith(makeDeps({
+      getModelUsageSince: async () => [
+        modelRow(
+          TODAY,
+          'pi',
+          piSubscriptionUsageModelKey('gpt-5.5'),
+          actual(0),
+          { inputTokens: 100_000, outputTokens: 2_000, cacheReadTokens: 900_000 },
+        ),
+      ],
+    }));
+
+    expect(result.models[0]).toMatchObject({
+      agentKind: 'pi',
+      model: 'gpt-5.5',
+      inputTokens: 100_000,
+      cacheReadTokens: 900_000,
+    });
+    expect(result.models[0].estimatedMoney?.amount).toBeGreaterThan(0);
+    expect(result.totals.todayTokens).toBe(1_002_000);
   });
 
   it('marks estimates pending only when a subscription price is missing during refresh', async () => {

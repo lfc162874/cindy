@@ -23,7 +23,10 @@ import {
   type DesktopLoginActionResult,
   type User,
 } from '@/lib/authService';
-import { setCurrentUserName } from '@/lib/makerChatStore';
+import {
+  cancelRemoteOptimisticSendsForDataOwnerBoundary,
+  setCurrentUserName,
+} from '@/lib/makerChatStore';
 import { isSecondaryWindow } from '@/lib/secondaryWindow';
 import { setUserPromptOwner } from '@/lib/userPromptStore';
 import { bootstrapMemorySettingsFromMain, setMemorySettingsOwner } from '@/lib/memorySettingsStore';
@@ -33,7 +36,9 @@ import { isGhostPanelWindow } from '@/lib/ghostPanelWindow';
 import { setNewMakerDraftOwner } from '@/state/newMakerDraft';
 import { setComposerDraftOwner } from '@/lib/composerDraftStore';
 import { setPendingHandoffOwner } from '@/state/pendingFirstMessage';
-import { setDataOwnerGeneration } from './dataOwnerGeneration';
+import { invalidateProvidersSnapshot } from '@/lib/providersSnapshotStore';
+import { preloadLocalCatalogSnapshot } from '@/lib/localCatalogSnapshot';
+import { getDataOwnerGeneration, setDataOwnerGeneration } from './dataOwnerGeneration';
 
 /**
  * 登录态上下文：user / isAuthenticated / isCanary / deviceId 全部来自 main 的
@@ -47,6 +52,8 @@ export interface AuthContextValue {
   user: User | null;
   mode: 'signed-out' | 'local' | 'cloud';
   dataOwnerId: string | null;
+  /** Failed auth boundaries remount owner-scoped routes so stale generations can rehydrate. */
+  dataOwnerRecoveryEpoch: number;
   canEnterApp: boolean;
   isAuthenticated: boolean;
   /** 当前账号是否加入 Canary 发布通道。 */
@@ -63,22 +70,38 @@ export interface AuthContextValue {
   exitLocalMode: () => Promise<void>;
   hasAccountDeletionReceipt: boolean;
   accountDeletionRestored: boolean;
-  getAccountDeletionAvailability: ReturnType<typeof createAuthService>['getAccountDeletionAvailability'];
-  requestAccountDeletionChallenge: ReturnType<typeof createAuthService>['requestAccountDeletionChallenge'];
+  getAccountDeletionAvailability: ReturnType<
+    typeof createAuthService
+  >['getAccountDeletionAvailability'];
+  requestAccountDeletionChallenge: ReturnType<
+    typeof createAuthService
+  >['requestAccountDeletionChallenge'];
   confirmAccountDeletion: ReturnType<typeof createAuthService>['confirmAccountDeletion'];
   getAccountDeletionStatus: ReturnType<typeof createAuthService>['getAccountDeletionStatus'];
   clearAccountDeletionReceipt: ReturnType<typeof createAuthService>['clearAccountDeletionReceipt'];
-  consumeAccountDeletionRestoredNotice: ReturnType<typeof createAuthService>['consumeAccountDeletionRestoredNotice'];
+  consumeAccountDeletionRestoredNotice: ReturnType<
+    typeof createAuthService
+  >['consumeAccountDeletionRestoredNotice'];
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 const log = createLogger('AuthContext');
 
+function publishDataOwnerGeneration(dataOwnerId: string | null, ownerGeneration?: number): void {
+  const previousOwnerId = getDataOwnerGeneration().dataOwnerId;
+  if (previousOwnerId !== dataOwnerId) {
+    cancelRemoteOptimisticSendsForDataOwnerBoundary();
+  }
+  setDataOwnerGeneration(dataOwnerId, ownerGeneration);
+  if (previousOwnerId !== dataOwnerId) invalidateProvidersSnapshot();
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [mode, setMode] = useState<'signed-out' | 'local' | 'cloud'>('signed-out');
   const [dataOwnerId, setDataOwnerId] = useState<string | null>(null);
+  const [dataOwnerRecoveryEpoch, setDataOwnerRecoveryEpoch] = useState(0);
   const [canEnterApp, setCanEnterApp] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isCanary, setIsCanary] = useState(false);
@@ -97,7 +120,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const activeUserIdRef = useRef<string | null>(null);
   const activeDataOwnerIdRef = useRef<string | null>(null);
+  const activeDataOwnerGenerationRef = useRef(0);
   const authStateVersionRef = useRef(0);
+
+  // Auth mutations invalidate owner-bound in-flight reads before crossing IPC. If Main rejects
+  // the transition, restore the single authoritative owner ref (which successful siblings and
+  // newer pushes both update), then rebuild the cache because React state may never have changed.
+  const runDataOwnerBoundary = useCallback(async <T,>(operation: () => Promise<T>): Promise<T> => {
+    publishDataOwnerGeneration(null);
+    try {
+      return await operation();
+    } catch (error) {
+      // Restore the exact main-owned generation. Recomputing it locally would
+      // make every stamped push from the still-active owner look stale after a
+      // rejected auth transition.
+      publishDataOwnerGeneration(
+        activeDataOwnerIdRef.current,
+        activeDataOwnerGenerationRef.current,
+      );
+      setDataOwnerRecoveryEpoch((epoch) => epoch + 1);
+      void preloadLocalCatalogSnapshot();
+      throw error;
+    }
+  }, []);
 
   /**
    * 身份即 auth-server membership(产品 role 水合已随 /api/me 退役,2026-07)。
@@ -114,12 +159,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const applyIncomingState = useCallback(
     (state: AuthState) => {
       const ownerChanged = activeDataOwnerIdRef.current !== state.dataOwnerId;
-      setDataOwnerGeneration(state.dataOwnerId);
+      publishDataOwnerGeneration(state.dataOwnerId, state.ownerGeneration);
       if (ownerChanged) {
         sessionsStore.reset();
         clearWorkersCache();
       }
       activeDataOwnerIdRef.current = state.dataOwnerId;
+      activeDataOwnerGenerationRef.current = state.ownerGeneration;
       setNewMakerDraftOwner(state.dataOwnerId);
       setComposerDraftOwner(state.dataOwnerId);
       setPendingHandoffOwner(state.dataOwnerId);
@@ -187,7 +233,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setCanEnterApp(false);
         setMode('signed-out');
         setDataOwnerId(null);
-        setDataOwnerGeneration(null);
+        publishDataOwnerGeneration(null);
         activeDataOwnerIdRef.current = null;
         activeUserIdRef.current = null;
         setLoginState(null);
@@ -226,7 +272,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (handling) return;
       handling = true;
       // Invalidate in-flight remote sends before the confirmation dialog resolves.
-      setDataOwnerGeneration(null);
+      publishDataOwnerGeneration(null);
       // main 只给客户端内部分类(不透传服务端原文),按 reason 选本地化文案,
       // 让用户区分「被顶下线 / 凭证被外部实例清除 / 自然过期 / 账号不可用」。
       const descriptionKey =
@@ -276,16 +322,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async () => {
-    setDataOwnerGeneration(null);
-    await authServiceRef.current!.logout();
+    await runDataOwnerBoundary(() => authServiceRef.current!.logout());
     sessionsStore.reset();
     clearWorkersCache();
-  }, []);
+  }, [runDataOwnerBoundary]);
 
   const enterLocalMode = useCallback(async () => {
-    setDataOwnerGeneration(null);
-    const state = await authServiceRef.current!.enterLocalMode();
-    setDataOwnerGeneration(state.dataOwnerId);
+    const state = await runDataOwnerBoundary(() => authServiceRef.current!.enterLocalMode());
+    publishDataOwnerGeneration(state.dataOwnerId, state.ownerGeneration);
+    activeDataOwnerIdRef.current = state.dataOwnerId;
+    activeDataOwnerGenerationRef.current = state.ownerGeneration;
     setComposerDraftOwner(state.dataOwnerId);
     setPendingHandoffOwner(state.dataOwnerId);
     setMode(state.mode);
@@ -293,12 +339,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setCanEnterApp(state.canEnterApp);
     setIsAuthenticated(state.isAuthenticated);
     setUser(state.user);
-  }, []);
+  }, [runDataOwnerBoundary]);
 
   const exitLocalMode = useCallback(async () => {
-    setDataOwnerGeneration(null);
-    const state = await authServiceRef.current!.exitLocalMode();
-    setDataOwnerGeneration(state.dataOwnerId);
+    const state = await runDataOwnerBoundary(() => authServiceRef.current!.exitLocalMode());
+    publishDataOwnerGeneration(state.dataOwnerId, state.ownerGeneration);
+    activeDataOwnerIdRef.current = state.dataOwnerId;
+    activeDataOwnerGenerationRef.current = state.ownerGeneration;
     setComposerDraftOwner(state.dataOwnerId);
     setPendingHandoffOwner(state.dataOwnerId);
     setMode(state.mode);
@@ -306,7 +353,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setCanEnterApp(state.canEnterApp);
     setIsAuthenticated(state.isAuthenticated);
     setUser(state.user);
-  }, []);
+  }, [runDataOwnerBoundary]);
 
   const getAccountDeletionAvailability = useCallback(
     () => authServiceRef.current!.getAccountDeletionAvailability(),
@@ -351,6 +398,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       mode,
       dataOwnerId,
+      dataOwnerRecoveryEpoch,
       canEnterApp,
       isAuthenticated,
       isCanary,
@@ -375,6 +423,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       mode,
       dataOwnerId,
+      dataOwnerRecoveryEpoch,
       canEnterApp,
       isAuthenticated,
       isCanary,

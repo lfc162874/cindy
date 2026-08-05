@@ -92,12 +92,14 @@ import {
   beginAppSessionBoundary,
   commitActiveAppSession,
   getActiveAppSession,
+  getActiveDataOwnerPushStamp,
   type AppSessionMode,
 } from './appSessionState.js';
 import {
   claimLegacyOwnerNamespace,
   recordLegacyGhostMigrationResult,
 } from './ownerNamespaceMigration.js';
+import { buildSafeStorageIssueMeta } from './safeStorageIssueLog.js';
 
 const log = createLogger('authManager');
 
@@ -182,6 +184,8 @@ export interface AuthState {
   mode: AppSessionMode;
   /** Owner for local databases and owner-scoped private state. */
   dataOwnerId: string | null;
+  /** Main-owned owner boundary generation used to fence late renderer pushes. */
+  ownerGeneration: number;
   /** Local and cloud sessions may enter the main application. */
   canEnterApp: boolean;
   isAuthenticated: boolean;
@@ -335,14 +339,31 @@ let passiveLocalSignOut = false;
 
 const SAFE_STORAGE_DIR = () => path.join(app.getPath('userData'), 'safe-storage');
 
+// #871 可观测性:safeStorage 不可用 / 解密失败此前被静默折叠成 null,用户在系统
+// 钥匙串弹窗点「拒绝」后的降级完全不可诊断。按「原因 × key」各记一次(readSafe 在
+// 热路径上高频调用,不能每次都写;只按原因去重会掩盖「单个凭证损坏 vs 整个后端
+// 不可用」的区分,review 反馈)。错误只记 code/name,不记 message——fs 错误的
+// message 携带 userData 绝对路径,不该进保留 30 天的日志;密文/明文更不落。
+const safeStorageIssueLogged = new Set<string>();
+function logSafeStorageIssueOnce(reason: string, key: string, err?: unknown): void {
+  const issueKey = `${reason}:${key}`;
+  if (safeStorageIssueLogged.has(issueKey)) return;
+  safeStorageIssueLogged.add(issueKey);
+  log.warn(`safeStorage ${reason}`, buildSafeStorageIssueMeta(key, err));
+}
+
 function readSafe(key: string): string | null {
   try {
-    if (!safeStorage.isEncryptionAvailable()) return null;
+    if (!safeStorage.isEncryptionAvailable()) {
+      logSafeStorageIssueOnce('encryption unavailable (read)', key);
+      return null;
+    }
     const filepath = path.join(SAFE_STORAGE_DIR(), `${key}.enc`);
     if (!fs.existsSync(filepath)) return null;
     const content = fs.readFileSync(filepath, 'utf-8');
     return safeStorage.decryptString(Buffer.from(content, 'base64'));
-  } catch {
+  } catch (err) {
+    logSafeStorageIssueOnce('decrypt failed', key, err);
     return null;
   }
 }
@@ -371,7 +392,10 @@ function isPersistedSecretAbsent(key: string): boolean {
 
 function writeSafe(key: string, value: string): boolean {
   try {
-    if (!safeStorage.isEncryptionAvailable()) return false;
+    if (!safeStorage.isEncryptionAvailable()) {
+      logSafeStorageIssueOnce('encryption unavailable (write)', key);
+      return false;
+    }
     const dir = SAFE_STORAGE_DIR();
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
@@ -380,7 +404,8 @@ function writeSafe(key: string, value: string): boolean {
       'utf-8',
     );
     return true;
-  } catch {
+  } catch (err) {
+    logSafeStorageIssueOnce('encrypt/persist failed', key, err);
     return false;
   }
 }
@@ -637,8 +662,9 @@ function removeSafeIfUnchanged(key: string, expected: string): RemoveIfUnchanged
   } catch (err) {
     // 这一瞬别人已经删掉了 → 目标状态达成,算成功。
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return 'deleted';
-    // EPERM / EACCES / EBUSY 等:凭证仍在盘上。
-    log.warn(`failed to delete persisted secret ${key}: ${(err as Error).message}`);
+    // EPERM / EACCES / EBUSY 等:凭证仍在盘上。与读写路径同一 helper——只记
+    // code/name,fs 错误的 message 携带 userData 绝对路径,不进长期日志。
+    logSafeStorageIssueOnce('delete failed', key, err);
     return 'failed';
   }
 }
@@ -1200,10 +1226,12 @@ async function runAuthRefreshWithReplacementRetry(
  * 窗口,本函数沿用同样语义;overlay 等无 listener 的窗口会忽略该事件,无副作用。
  */
 function broadcastToRenderers(channel: string, payload: unknown): void {
+  const ownerStamp = getActiveDataOwnerPushStamp();
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
     try {
-      win.webContents.send(channel, payload);
+      if (ownerStamp === undefined) win.webContents.send(channel, payload);
+      else win.webContents.send(channel, payload, ownerStamp);
     } catch (err) {
       log.warn(`broadcast '${channel}' to window failed (non-fatal)`, err);
     }
@@ -1244,6 +1272,7 @@ function snapshotAuthState(): AuthState {
       : null,
     mode: appSession.mode,
     dataOwnerId: appSession.dataOwnerId,
+    ownerGeneration: appSession.generation,
     canEnterApp: appSession.mode !== 'signed-out',
     isAuthenticated: isCloudAuthenticated,
     isCanary: currentUser !== null && canaryFlagStore.read(),
@@ -1255,10 +1284,12 @@ function snapshotAuthState(): AuthState {
 
 /** Logged-out projection used by stale/timeout paths that must not expose newer auth state. */
 function snapshotLoggedOutAuthState(): AuthState {
+  const appSession = getActiveAppSession();
   return {
     user: null,
     mode: 'signed-out',
     dataOwnerId: null,
+    ownerGeneration: appSession.generation,
     canEnterApp: false,
     isAuthenticated: false,
     isCanary: false,

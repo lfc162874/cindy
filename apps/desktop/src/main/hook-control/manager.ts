@@ -80,6 +80,7 @@ import type {
 import {
   DEFAULT_SLACK_LIFECYCLE_ANNOUNCEMENT,
   type ProviderBindingCacheEntry,
+  type SlackHookConfigState,
   type SlackHookStore,
 } from './store.js';
 import type { HookDispatcher } from './dispatcher.js';
@@ -500,6 +501,21 @@ type ProviderBindRequest =
  */
 export type NeutralHookProvider = Exclude<ClientHookProvider, 'slack'>;
 
+/**
+ * 该 provider 的默认工作目录别名(null = 用内置「对话」伪目录)。
+ *
+ * 只有 provider-neutral 的两条线有: Slack 的默认值走它自己那张卡。协议里
+ * `hello.defaultWorkspace` 本身是 provider 无关字段, 每条 lane 各带自己那份。
+ */
+function defaultWorkspaceOf(
+  config: Pick<SlackHookConfigState, 'telegramDefaultWorkspace' | 'xDefaultWorkspace'>,
+  provider: HookProvider | undefined,
+): string | null {
+  if (provider === 'telegram') return config.telegramDefaultWorkspace;
+  if (provider === 'x') return config.xDefaultWorkspace;
+  return null;
+}
+
 /** renderer 请求打开 provider 相关链接的动作(openProviderAction 的值域)。 */
 type ProviderOpenAction = 'connect' | 'provider' | 'add-to-group';
 
@@ -639,23 +655,25 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
   /** (multi-team)在途授权状态(添加/重绑 workspace 的 pending 与其终止态)。 */
   let pendingBind: HookPendingBindView | null = null;
 
-  // ── provider-neutral 连接线注册表(目前仅 Telegram; 新 provider 在此追加) ────
+  // ── provider-neutral 连接线注册表(Telegram 与 X; 新 provider 在此追加) ────
+
+  // 服务端用客户端 hello.features 判定 provider 协商结果，因此客户端要求
+  // 服务端具备的基础能力也必须全部自报；共用一份清单避免双向契约再次漂移。
+  const telegramProviderBaseFeatures = [
+    HOOK_FEATURE_PROVIDER_BIND,
+    HOOK_FEATURE_PROVIDER_PREFS,
+    HOOK_FEATURE_SESSION_PICKER,
+    HOOK_FEATURE_PROVIDER_TELEGRAM,
+  ] as const;
 
   const telegramConfig: NeutralProviderConfig = {
     provider: 'telegram',
     label: 'Telegram',
     getUrl: getTelegramUrl,
     notConfiguredError: 'Telegram service endpoint is not configured',
-    requiredFeatures: [
-      HOOK_FEATURE_PROVIDER_BIND,
-      HOOK_FEATURE_PROVIDER_PREFS,
-      HOOK_FEATURE_SESSION_PICKER,
-      HOOK_FEATURE_PROVIDER_TELEGRAM,
-    ],
+    requiredFeatures: telegramProviderBaseFeatures,
     helloFeatures: [
-      HOOK_FEATURE_PROVIDER_BIND,
-      HOOK_FEATURE_PROVIDER_PREFS,
-      HOOK_FEATURE_SESSION_PICKER,
+      ...telegramProviderBaseFeatures,
       HOOK_FEATURE_GROUP_RELAY,
       HOOK_FEATURE_GROUP_RELAY_RECIPIENT,
       HOOK_FEATURE_PROVIDER_BEHAVIOR,
@@ -1145,7 +1163,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       binding:
         lane.binding === null ? null : { ...lane.binding, actions: [...lane.binding.actions] },
       // store 侧已保证读出来的别名仍然有效(目录删掉即归零), 这里直投。
-      defaultWorkspace: lane.config.provider === 'x' ? store.get().xDefaultWorkspace : null,
+      defaultWorkspace: defaultWorkspaceOf(store.get(), lane.config.provider),
     };
   }
 
@@ -1722,6 +1740,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     // 每次连接成功都重读配置 —— 别名映射变更后重连即生效
     const device = deviceInfo();
     const config = store.get();
+    const defaultWorkspace = defaultWorkspaceOf(config, provider);
     return {
       deviceId: device.deviceId,
       deviceName: device.deviceName,
@@ -1734,14 +1753,11 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       ...(includeLifecycleAnnouncement
         ? { lifecycleAnnouncement: lifecycleAnnouncementEnabled() }
         : {}),
-      // 默认工作目录目前只有 X 需要 —— Slack / Telegram 能在会话里当场选目录,
-      // X 一条推文里没有选择面板的位置。协议字段本身是 provider 无关的, 将来
-      // 别的渠道要用直接在这里加分支即可。
+      // 默认工作目录: X 与 Telegram 都有(Slack 的默认仍走它自己的卡)。
       // store 侧已保证读出来的别名仍在 workspaces 里(目录删掉即归零), 所以这里
       // 不再复核 —— 复核两遍反而会让"哪边是权威"变模糊。
-      ...(provider === 'x' && config.xDefaultWorkspace !== null
-        ? { defaultWorkspace: config.xDefaultWorkspace }
-        : {}),
+      // 只算一次再复用: 判断与赋值必须是同一个值(将来这个函数变复杂也不会分叉)。
+      ...(defaultWorkspace !== null ? { defaultWorkspace } : {}),
     };
   }
 

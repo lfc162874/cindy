@@ -129,6 +129,24 @@ const dualDiscoveryPreset = {
   },
 };
 
+const piReasoningPreset = {
+  id: 'pi-reasoning',
+  name: 'Pi Reasoning',
+  runtimes: {
+    pi: {
+      baseUrl: 'https://pi.example/v1',
+      models: [
+        {
+          id: 'reasoning-model',
+          name: 'Reasoning Model',
+          reasoning: true,
+          reasoningEfforts: ['low', 'high'] as const,
+        },
+      ],
+    },
+  },
+};
+
 function renderWizard(presetId: string) {
   return render(
     React.createElement(AddProviderWizard, {
@@ -151,6 +169,7 @@ beforeEach(() => {
           unsafeNoAuthDiscoveryPreset,
           openCodePreset,
           dualDiscoveryPreset,
+          piReasoningPreset,
         ],
       })),
       // 列模型失败场景兜底(Greptile P1 回归):官方 API 预设必须靠推荐模型仍可完成。
@@ -306,6 +325,25 @@ describe('AddProviderWizard — preset 直达', () => {
     expect(keys).toMatchObject({ 'claude-code': 'sk-test', codex: 'sk-test' });
   });
 
+  it('Pi 预设保存时保留显式 reasoning 能力与支持档位', async () => {
+    renderWizard('pi-reasoning');
+
+    await waitFor(() => expect(screen.getByDisplayValue('Pi Reasoning')).not.toBeNull());
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), { target: { value: 'sk-test' } });
+    fireEvent.click(screen.getByText('settings.providers.wizard.next'));
+    await waitFor(() => expect(screen.getByText('Reasoning Model')).not.toBeNull());
+    fireEvent.click(screen.getByText('settings.providers.wizard.finish'));
+
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.pi?.models).toEqual([
+      expect.objectContaining({
+        id: 'reasoning-model',
+        reasoning: true,
+        reasoningEfforts: ['low', 'high'],
+      }),
+    ]);
+  });
+
   it('editable preset saves the edited base URL and exact request path', async () => {
     const editablePreset = {
       id: 'local-gateway',
@@ -451,7 +489,7 @@ describe('AddProviderWizard — preset 直达', () => {
     // 同一 model id 在两端窗口可以不同(如 cc=1M / codex=272K):共享一个发现值
     // 会让其中一端显示与压缩阈值双错,必须按 agent 分槽各取各的端点上报值。
     vi.mocked(window.electronAPI.maker.fetchProviderModels).mockImplementation(
-      async ({ agent }: { agent: 'claude-code' | 'codex' }) => ({
+      async ({ agent }: { agent: 'claude-code' | 'codex' | 'pi' }) => ({
         ok: true,
         models: [
           {
