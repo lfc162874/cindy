@@ -439,10 +439,11 @@ export function applyAgentIslandUserPrompt(
   prompt: string,
   now: number,
 ): boolean {
+  // 新 user prompt 是明确的新轮边界:此前显式移除留下的终态墓碑
+  // 在文字为空(纯附件)时也要清除,否则灵动岛和活动栏永不恢复。
+  state.dismissedTerminalSessionIds.delete(meta.sessionId);
   const text = normalizeActivityText(prompt);
   if (!text) return false;
-  // 新 user prompt 是明确的新轮边界:此前显式移除留下的终态墓碑到这里才失效。
-  state.dismissedTerminalSessionIds.delete(meta.sessionId);
   const session = getOrCreateSession(state, meta, now);
   applyMeta(session, meta);
   const retainError = session.phase === 'error'

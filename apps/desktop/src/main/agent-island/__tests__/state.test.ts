@@ -2288,6 +2288,31 @@ describe('Agent Island error 保留窗口(重试时旧错误在新消息完成�
   });
 });
 
+  it('纯附件/图片发送时也清除 dismiss 墓碑(不移除则灵动岛永不恢复)', () => {
+    const state = createAgentIslandState();
+    const meta = { sessionId: 's1', title: 'Task', agentKind: 'codex' };
+
+    // 先完成一次任务,用户 dismiss 掉终态卡片。
+    applyAgentIslandUserPrompt(state, meta, 'first task', 1_000);
+    applyAgentIslandEvent(state, meta, terminalErrorEvent('boom'), 2_000);
+    expect(dismissAgentIslandSession(state, 's1', 2_100)).toBe('cleared');
+
+    // 纯附件(空文字)发送:normalizeActivityText 返回空,旧逻辑会在
+    // delete 之前 return false。新逻辑下墓碑应在文字判空前就清除。
+    const changed = applyAgentIslandUserPrompt(state, meta, '', 3_000);
+    expect(state.dismissedTerminalSessionIds.has('s1')).toBe(false);
+    // 空文字不应创建条目(返回 false),但墓碑已清。
+    expect(changed).toBe(false);
+
+    // 随后的 running 事件不应被 dismissedTerminalSessionIds 拦截。
+    expect(applyAgentIslandEvent(state, meta, statusEvent(true, 'Generating...'), 3_100)).toBe(true);
+    expect(buildAgentIslandDisplayState(state, 3_150).sessions[0]).toMatchObject({
+      sessionId: 's1',
+      phase: 'running',
+      detail: 'Generating...',
+    });
+  });
+
 describe('Agent Island 未读驻留 TTL(避免几小时前完成的任务无限期霸占展开列表)', () => {
   it('unread completed 条目在 TTL 内仍然可见', () => {
     const state = createAgentIslandState();
